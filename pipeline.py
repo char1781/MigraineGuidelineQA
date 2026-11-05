@@ -136,22 +136,51 @@ def run_pipeline_after_review(review_id: str) -> Dict:
         }
     """
     from src.ingestion.es_review_editor import ESReviewEditor
-    from elasticsearch import Elasticsearch
-    from src.indexing.chroma_indexer import build_chroma_index
-    from src.ingestion.graph_builder import build_graph
     
     editor = ESReviewEditor()
     review_data = editor.load_reviewed_data(review_id)
-    
-    # 获取关联的MD文件路径（从review_data推断）
-    guideline_name = review_data["guideline_name"]
-    md_path = f"data/processed/{guideline_name}.md"
-    
-    if not Path(md_path).exists():
-        # 兜底：尝试从source_file找
-        json_name = review_data["source_file"]
-        md_path = f"data/processed/{Path(json_name).stem}.md"
-    
+
+    def _resolve_md_path(review_data: Dict) -> str:
+        candidates = []
+        guideline_name = review_data.get("guideline_name")
+        if guideline_name:
+            candidates.extend([
+                f"data/processed/{guideline_name}.md",
+                f"data/processed/{guideline_name.replace(' ', '_')}.md",
+            ])
+
+        src_name = review_data.get("source_file")
+        if src_name:
+            stem = Path(src_name).stem
+            candidates.extend([
+                f"data/processed/{stem}.md",
+                f"data/processed/{stem}_full.md",
+                f"data/processed/{stem}_mineru.md",
+            ])
+
+        candidates.extend([
+            "data/processed/full.md",
+            "data/processed/*.md",
+        ])
+
+        for cand in candidates:
+            if cand.endswith("*.md"):
+                matches = sorted(Path("data/processed").glob("*.md"))
+                if matches:
+                    return str(matches[0])
+                continue
+            p = Path(cand)
+            if p.exists():
+                return str(p)
+
+        matches = sorted(Path("data/processed").rglob("*.md"))
+        if matches:
+            return str(matches[0])
+        raise FileNotFoundError(
+            "未找到可用于 GraphRAG/Chroma 的 MD 文件；需要先确认 MinerU 产物为 full.md 或其它 .md 文件。"
+        )
+
+    md_path = _resolve_md_path(review_data)
     return _continue_pipeline_after_review(review_id, "", md_path)
 
 
@@ -272,13 +301,13 @@ def _continue_pipeline_after_review(
         gb = GraphBuilder()
         target = gb.add_markdown(
             md_path,
-            guideline_name=review_data.get("guideline_name"),
-            year=review_data.get("guideline_year"),
+            guideline_name=review_data.get("guideline_name") or Path(md_path).stem,
+            year=review_data.get("guideline_year") if review_data.get("guideline_year") not in (None, 1111) else None,
         )
         print(f"[Pipeline] GraphRAG已复制MD到输入目录: {target}")
-        gb.start_index()
-        graph_success = True
-        print(f"[Pipeline] ✅ GraphRAG 索引已启动")
+        status = gb.start_index()
+        graph_success = bool(status.get("state") == "running" or status.get("state") == "idle")
+        print(f"[Pipeline] ✅ GraphRAG 索引已启动: {status}")
     except Exception as e:
         print(f"[Pipeline] ⚠️ GraphRAG 跳过: {e}")
 
