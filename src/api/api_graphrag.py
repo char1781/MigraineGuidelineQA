@@ -1,0 +1,391 @@
+"""
+GraphRAG 后端API接口
+整合到你的FastAPI系统中
+
+路径: 添加到你的 main.py 或 app.py 中
+"""
+
+from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
+from pydantic import BaseModel
+from typing import Optional, List, Literal
+import asyncio
+from pathlib import Path
+import shutil
+import logging
+
+# 导入你的GraphRAG模块
+from src.ingestion.graph_builder import GraphRAGBuilder
+from src.retrieval.graph_retriever import GraphRAGRetriever
+
+log = logging.getLogger(__name__)
+
+# 创建路由
+graphrag_router = APIRouter(prefix="/graphrag", tags=["GraphRAG"])
+
+# 初始化全局对象
+graph_builder = GraphRAGBuilder(
+    graphrag_root="./graphrag-main",
+    cache_dir="./pdf_cache",
+    use_cache=True
+)
+
+graph_retriever = GraphRAGRetriever(
+    graphrag_root="./graphrag-main",
+    default_method="local"
+)
+
+
+# ========================================
+# 请求/响应模型
+# ========================================
+
+class GraphRAGQueryRequest(BaseModel):
+    """GraphRAG查询请求"""
+    question: str
+    method: Optional[Literal["local", "global", "drift"]] = "local"
+    community_level: int = 2
+    response_type: str = "Multiple Paragraphs"
+
+
+class GraphRAGQueryResponse(BaseModel):
+    """GraphRAG查询响应"""
+    success: bool
+    answer: Optional[str] = None
+    method: str
+    context: List[dict] = []
+    sources: List[str] = []
+    error: Optional[str] = None
+
+
+class GraphRAGBuildRequest(BaseModel):
+    """GraphRAG构建请求"""
+    doc_id: str  # 从MinerU缓存中获取
+
+
+class GraphRAGBuildResponse(BaseModel):
+    """GraphRAG构建响应"""
+    success: bool
+    doc_id: str
+    status: str
+    message: str
+    error: Optional[str] = None
+
+
+class GraphRAGStatusResponse(BaseModel):
+    """GraphRAG状态响应"""
+    index_ready: bool
+    indexed_docs: int
+    last_index_time: Optional[str]
+    output_exists: bool
+
+
+# ========================================
+# API端点
+# ========================================
+
+@graphrag_router.post("/query", response_model=GraphRAGQueryResponse)
+async def query_graphrag(request: GraphRAGQueryRequest):
+    """
+    GraphRAG查询接口
+    
+    前端调用示例：
+    ```javascript
+    const response = await fetch('/graphrag/query', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            question: "偏头痛的治疗方法有哪些？",
+            method: "local"
+        })
+    });
+    const data = await response.json();
+    console.log(data.answer);
+    ```
+    """
+    try:
+        log.info(f"收到GraphRAG查询: {request.question[:50]}...")
+        
+        # 执行查询
+        result = await graph_retriever.query(
+            question=request.question,
+            method=request.method,
+            community_level=request.community_level,
+            response_type=request.response_type
+        )
+        
+        return GraphRAGQueryResponse(**result)
+    
+    except Exception as e:
+        log.error(f"查询失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@graphrag_router.post("/query/multi", response_model=dict)
+async def query_graphrag_multi_method(
+    question: str,
+    methods: List[str] = ["local", "global"]
+):
+    """
+    多方法查询接口
+    
+    前端调用示例：
+    ```javascript
+    const response = await fetch('/graphrag/query/multi?question=xxx&methods=local,global', {
+        method: 'POST'
+    });
+    const data = await response.json();
+    console.log(data.combined_answer);
+    ```
+    """
+    try:
+        result = await graph_retriever.query_multi_method(question, methods)
+        return result
+    
+    except Exception as e:
+        log.error(f"多方法查询失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@graphrag_router.post("/build", response_model=GraphRAGBuildResponse)
+async def build_graph(
+    request: GraphRAGBuildRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    构建知识图谱接口（异步）
+    
+    前端调用示例：
+    ```javascript
+    // 用户上传PDF后，从MinerU缓存构建GraphRAG
+    const response = await fetch('/graphrag/build', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            doc_id: "guideline1_1234567890"
+        })
+    });
+    const data = await response.json();
+    
+    if (data.success) {
+        console.log("GraphRAG构建已启动，请稍后查询状态");
+        // 轮询状态
+        checkBuildStatus();
+    }
+    ```
+    """
+    try:
+        log.info(f"收到GraphRAG构建请求: {request.doc_id}")
+        
+        # 后台任务：构建图谱
+        background_tasks.add_task(
+            _build_graph_background,
+            request.doc_id
+        )
+        
+        return GraphRAGBuildResponse(
+            success=True,
+            doc_id=request.doc_id,
+            status="building",
+            message="GraphRAG构建已启动，请稍后查询状态"
+        )
+    
+    except Exception as e:
+        log.error(f"启动构建失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@graphrag_router.post("/build/batch")
+async def build_graph_batch(
+    doc_ids: List[str],
+    background_tasks: BackgroundTasks
+):
+    """
+    批量构建知识图谱接口
+    
+    前端调用示例：
+    ```javascript
+    const response = await fetch('/graphrag/build/batch', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            doc_ids: ["guideline1_xxx", "guideline2_xxx"]
+        })
+    });
+    ```
+    """
+    try:
+        log.info(f"收到批量构建请求: {len(doc_ids)} 个文档")
+        
+        # 后台任务
+        background_tasks.add_task(
+            _build_graph_batch_background,
+            doc_ids
+        )
+        
+        return {
+            'success': True,
+            'status': 'building',
+            'count': len(doc_ids),
+            'message': f"批量构建已启动（{len(doc_ids)}个文档）"
+        }
+    
+    except Exception as e:
+        log.error(f"启动批量构建失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@graphrag_router.get("/status", response_model=GraphRAGStatusResponse)
+async def get_graphrag_status():
+    """
+    获取GraphRAG状态
+    
+    前端调用示例：
+    ```javascript
+    const response = await fetch('/graphrag/status');
+    const data = await response.json();
+    
+    if (data.index_ready) {
+        console.log("GraphRAG索引已就绪，可以查询");
+    } else {
+        console.log("索引尚未准备好");
+    }
+    ```
+    """
+    try:
+        # 获取构建器状态
+        build_status = graph_builder.get_index_status()
+        
+        # 获取检索器状态
+        retriever_info = graph_retriever.get_index_info()
+        
+        return GraphRAGStatusResponse(
+            index_ready=retriever_info['is_ready'],
+            indexed_docs=build_status['indexed_docs'],
+            last_index_time=build_status['last_index_time'],
+            output_exists=build_status['output_exists']
+        )
+    
+    except Exception as e:
+        log.error(f"获取状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@graphrag_router.get("/info")
+async def get_graphrag_info():
+    """
+    获取GraphRAG详细信息
+    
+    返回索引器和检索器的完整信息
+    """
+    try:
+        build_status = graph_builder.get_index_status()
+        retriever_info = graph_retriever.get_index_info()
+        
+        return {
+            'builder': build_status,
+            'retriever': retriever_info,
+            'available_methods': graph_retriever.get_available_methods()
+        }
+    
+    except Exception as e:
+        log.error(f"获取信息失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@graphrag_router.delete("/index")
+async def clear_graphrag_index():
+    """
+    清空GraphRAG索引
+    
+    用于重置或重建索引
+    """
+    try:
+        graph_builder.clear_input()
+        graph_builder.clear_output()
+        
+        return {
+            'success': True,
+            'message': 'GraphRAG索引已清空'
+        }
+    
+    except Exception as e:
+        log.error(f"清空索引失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========================================
+# 后台任务
+# ========================================
+
+async def _build_graph_background(doc_id: str):
+    """后台构建GraphRAG（单个文档）"""
+    try:
+        log.info(f"[后台任务] 开始构建: {doc_id}")
+        
+        result = await graph_builder.build_graph_from_pdf(
+            pdf_path=None,  # 从缓存获取，不需要PDF路径
+            doc_id=doc_id
+        )
+        
+        if result['success']:
+            log.info(f"[后台任务] 构建成功: {doc_id}")
+        else:
+            log.error(f"[后台任务] 构建失败: {doc_id} - {result.get('error')}")
+    
+    except Exception as e:
+        log.error(f"[后台任务] 构建异常: {e}")
+        import traceback
+        log.error(traceback.format_exc())
+
+
+async def _build_graph_batch_background(doc_ids: List[str]):
+    """后台批量构建GraphRAG"""
+    try:
+        log.info(f"[后台任务] 开始批量构建: {len(doc_ids)} 个文档")
+        
+        result = await graph_builder.build_graph_batch(
+            pdf_list=[None] * len(doc_ids),  # 从缓存获取
+            doc_ids=doc_ids
+        )
+        
+        log.info(f"[后台任务] 批量构建完成: {result['succeeded']}/{result['total']} 成功")
+    
+    except Exception as e:
+        log.error(f"[后台任务] 批量构建异常: {e}")
+        import traceback
+        log.error(traceback.format_exc())
+
+
+# ========================================
+# 注册路由到主应用
+# ========================================
+
+def register_graphrag_routes(app):
+    """
+    将GraphRAG路由注册到FastAPI应用
+    
+    在你的main.py中调用：
+    ```python
+    from api_graphrag import register_graphrag_routes
+    
+    app = FastAPI()
+    register_graphrag_routes(app)
+    ```
+    """
+    app.include_router(graphrag_router)
+    log.info("✅ GraphRAG路由已注册")
+
+
+# ========================================
+# 使用示例（用于测试）
+# ========================================
+
+if __name__ == "__main__":
+    from fastapi import FastAPI
+    import uvicorn
+    
+    app = FastAPI(title="GraphRAG API测试")
+    register_graphrag_routes(app)
+    
+    # 运行测试服务器
+    uvicorn.run(app, host="0.0.0.0", port=8000)
