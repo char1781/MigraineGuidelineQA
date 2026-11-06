@@ -35,3 +35,10 @@ venv/
 # 测试和检查工具缓存
 .mypy_cache/
 .pytest_cache/
+
+# 忽略 docs 文件夹
+docs/
+
+# 忽略 Jupyter Notebook 文件（本地保留，不上传）
+*.ipynb
+.ipynb_checkpoints/
