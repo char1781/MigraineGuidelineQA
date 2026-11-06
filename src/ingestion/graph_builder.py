@@ -4,7 +4,9 @@ src/ingestion/graph_builder.py
 
 做法：
 1. add_markdown(): 把 md 复制到 GraphRAG 工作目录的 input/
-2. start_index(): 用 graphrag311 环境的 python 在后台执行 `python -m graphrag index --root <root>`
+2. start_index(): 用 graphrag311 环境的 python 在后台执行：
+   - 首次构建：`python -m graphrag index --root <root> --method standard`
+   - 增量更新：`python -m graphrag update --root <root> --method standard`
 3. get_status(): 读取状态文件（Streamlit 每次 rerun 都会丢变量，所以状态落盘）
 
 注意：GRAPHRAG_ROOT 必须是 "md 输入模式" 的工作目录（settings.yaml 里 file_type: text），
@@ -208,16 +210,20 @@ class GraphBuilder:
             out_dir.mkdir(parents=True, exist_ok=True)
             has_documents_storage = False
 
-        # 额外保护：如果 output 里已经有 documents.parquet，则才允许走 standard-update；
-        # 否则必须强制 standard，保证不会触发 `Could not find documents.parquet in storage!`。 
-        method = "standard-update" if has_documents_storage else "standard"
+        # GraphRAG 的正确增量入口不是 `graphrag index --method standard-update`，
+        # 而是 `graphrag update --method standard`。只有在 `output/documents.parquet` 存在时，
+        # 才能调用 update；否则必须回退到首次标准索引，避免出错。
         if has_documents_storage:
-            log.info("[GraphBuilder] 使用增量更新模式: standard-update")
+            command = "update"
+            method = "standard"
+            log.info("[GraphBuilder] 使用增量更新模式: graphrag update --method standard")
         else:
-            log.info("[GraphBuilder] 使用标准重建模式: standard")
+            command = "index"
+            method = "standard"
+            log.info("[GraphBuilder] 使用标准重建模式: graphrag index --method standard")
 
         cmd = (
-            f"{shlex.quote(self.python)} -m graphrag index --root {shlex.quote(str(self.root))}"
+            f"{shlex.quote(self.python)} -m graphrag {command} --root {shlex.quote(str(self.root))}"
             f" --method {method}"
             f" > {shlex.quote(str(self.log_file))} 2>&1; "
             f"status=$?; echo $status > {shlex.quote(str(self.exit_file))}; exit $status"

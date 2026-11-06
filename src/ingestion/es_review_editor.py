@@ -111,44 +111,64 @@ class ESReviewEditor:
     
     def _es_doc_to_review_record(self, es_doc: Dict, idx: int) -> Dict:
         """将ES文档转换为审核记录"""
-        intervention = es_doc.get("intervention", {})
-        
+        intervention = es_doc.get("intervention") or {}
+        if not isinstance(intervention, dict):
+            intervention = {}
+
         # 提取剂量信息（适配drug/tcm/physical三种类型）
         dose_info = {}
-        modality = intervention.get("modality_specific", {})
-        
+        modality = intervention.get("modality_specific") or {}
+        if not isinstance(modality, dict):
+            modality = {}
+
         if "drug_specific" in modality:
-            drug_spec = modality["drug_specific"]
-            dose = drug_spec.get("dose", {})
-            rec = dose.get("recommended", {})
-            max_d = dose.get("max_daily", {})
-            
-            dose_info = {
-                "recommended": rec.get("text_original", ""),
-                "max_daily": max_d.get("text_original", "") if max_d else "",
-            }
+            drug_spec = modality["drug_specific"] or {}
+            if isinstance(drug_spec, dict):
+                dose = drug_spec.get("dose") or {}
+                if isinstance(dose, dict):
+                    rec = dose.get("recommended") or {}
+                    max_d = dose.get("max_daily") or {}
+                    if not isinstance(rec, dict):
+                        rec = {}
+                    if not isinstance(max_d, dict):
+                        max_d = {}
+                    dose_info = {
+                        "recommended": rec.get("text_original", ""),
+                        "max_daily": max_d.get("text_original", "") if max_d else "",
+                    }
         elif "tcm_specific" in modality:
-            tcm_spec = modality["tcm_specific"]
-            dose_info = {
-                "recommended": intervention.get("frequency", ""),
-                "tcm_pattern": tcm_spec.get("tcm_pattern", ""),
-            }
+            tcm_spec = modality["tcm_specific"] or {}
+            if isinstance(tcm_spec, dict):
+                dose_info = {
+                    "recommended": intervention.get("frequency", ""),
+                    "tcm_pattern": tcm_spec.get("tcm_pattern", ""),
+                }
         elif "physical_specific" in modality:
-            phys_spec = modality["physical_specific"]
-            dose_info = {
-                "device": phys_spec.get("device", ""),
-                "target_site": ", ".join(phys_spec.get("target_site", [])),
-            }
-        
+            phys_spec = modality["physical_specific"] or {}
+            if isinstance(phys_spec, dict):
+                dose_info = {
+                    "device": phys_spec.get("device", ""),
+                    "target_site": ", ".join(phys_spec.get("target_site", []) or []),
+                }
+
         # 提取不良反应和禁忌症
-        safety = es_doc.get("safety", {})
-        adverse = safety.get("adverse_effects", {}).get("common", "")
-        contraindications = safety.get("contraindications", [])
-        
+        safety = es_doc.get("safety") or {}
+        if not isinstance(safety, dict):
+            safety = {}
+        adverse_effects = safety.get("adverse_effects") or {}
+        if not isinstance(adverse_effects, dict):
+            adverse_effects = {}
+        adverse = adverse_effects.get("common", "")
+        contraindications = safety.get("contraindications") or []
+
         # 提取来源信息
-        source = es_doc.get("source", {})
-        traceability = es_doc.get("traceability", {})
-        
+        source = es_doc.get("source") or {}
+        if not isinstance(source, dict):
+            source = {}
+        traceability = es_doc.get("traceability") or {}
+        if not isinstance(traceability, dict):
+            traceability = {}
+
         return {
             "id": f"rec_{idx:03d}",
             "rule_id": es_doc.get("rule_id"),
@@ -227,8 +247,8 @@ class ESReviewEditor:
                 data = json.loads(file_path.read_text(encoding="utf-8"))
                 extracted_count = int(data.get("extracted_count", 0) or 0)
                 review_status = data.get("review_status", "pending")
-                if extracted_count <= 0:
-                    continue
+                # 允许“空结果”审核记录也展示出来；这是上传了文档但没有抽到有效记录时的正常状态，
+                # 不能因为 extracted_count == 0 被静默过滤掉，否则前端会看不到该指南。
                 key = (str(data.get("guideline_name", "未知")), int(data.get("guideline_year", 0) or 0))
                 if key in seen:
                     continue

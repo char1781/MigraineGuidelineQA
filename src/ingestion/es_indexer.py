@@ -46,6 +46,9 @@ class MedicalGuidelineExtractor:
     """
 
     MAX_TABLE_HTML_LENGTH = 200000
+    MAX_TABLE_ROWS = 80
+    MAX_TABLE_COLS = 20
+    MAX_TABLE_CELLS = 1200
     
     # 配置常量
     DEFAULT_GUIDELINE_YEAR = 1111
@@ -627,6 +630,20 @@ class MedicalGuidelineExtractor:
                 print(f"  跳过超大表格[{table_idx+1}]：{len(html)} 字符，避免解析卡住")
                 continue
 
+            try:
+                soup = BeautifulSoup(html, 'html.parser')
+                rows = soup.find_all('tr')
+                row_count = len(rows)
+                cell_count = sum(len(r.find_all(['th', 'td'])) for r in rows)
+                if row_count > self.MAX_TABLE_ROWS or cell_count > self.MAX_TABLE_CELLS:
+                    print(
+                        f"  跳过过大/异常表格[{table_idx+1}]：{row_count}行、{cell_count}格，避免卡住"
+                    )
+                    continue
+            except Exception as exc:
+                print(f"  跳过无法解析的表格[{table_idx+1}]：{exc}")
+                continue
+
             if table.get('is_list_format'):
                 print(f"  跳过列表格式表格[{table_idx+1}]: {caption[:50]}...")
                 continue
@@ -703,14 +720,25 @@ class MedicalGuidelineExtractor:
         """
         if not html or not str(html).strip():
             return []
-        if len(str(html)) > self.MAX_TABLE_HTML_LENGTH:
-            print(f"[ESExtractor] 表格过大，跳过解析，长度={len(str(html))}")
+        html_text = str(html)
+        if len(html_text) > self.MAX_TABLE_HTML_LENGTH:
+            print(f"[ESExtractor] 表格过大，跳过解析，长度={len(html_text)}")
             return []
 
-        soup = BeautifulSoup(html, 'html.parser')
-        rows = soup.find_all('tr')
-        
+        try:
+            soup = BeautifulSoup(html_text, 'html.parser')
+            rows = soup.find_all('tr')
+        except Exception:
+            return []
+
         if not rows:
+            return []
+
+        total_cells = sum(len(r.find_all(['th', 'td'])) for r in rows)
+        if len(rows) > self.MAX_TABLE_ROWS or total_cells > self.MAX_TABLE_CELLS:
+            print(
+                f"[ESExtractor] 表格行列过多，跳过解析，rows={len(rows)} cells={total_cells}"
+            )
             return []
         
         # 第1步：计算最大列数
