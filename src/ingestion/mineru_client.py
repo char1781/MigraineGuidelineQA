@@ -230,10 +230,19 @@ class MinerUClient:
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(output_dir)
 
+        def _best_match(candidates, wanted: str, suffix: str):
+            preferred = []
+            for p in candidates:
+                name = p.name.lower()
+                if name.startswith(f"{wanted.lower()}.") or name.startswith(f"{wanted.lower()}_"):
+                    preferred.append(p)
+            if preferred:
+                return sorted(preferred, key=lambda p: p.name.lower())
+            return sorted(candidates, key=lambda p: p.name.lower())
+
         json_candidates = sorted(output_dir.rglob("*_model.json"))
         if not json_candidates:
             json_candidates = sorted(output_dir.rglob("*.json"))
-
         md_candidates = sorted(output_dir.rglob("*.md"))
         if not md_candidates:
             md_candidates = sorted(output_dir.rglob("**/*.md"))
@@ -243,8 +252,27 @@ class MinerUClient:
         if not md_candidates:
             raise FileNotFoundError(f"未找到 MD 文件，zip: {zip_path}")
 
+        json_candidates = _best_match(json_candidates, stem, ".json")
+        md_candidates = _best_match(md_candidates, stem, ".md")
+
+        chosen_json = json_candidates[0]
+        chosen_md = md_candidates[0]
+
+        final_json = output_dir / f"{stem}.json"
+        final_md = output_dir / f"{stem}.md"
+
+        if chosen_json != final_json:
+            if final_json.exists():
+                final_json.unlink()
+            chosen_json.rename(final_json)
+        if chosen_md != final_md:
+            if final_md.exists():
+                final_md.unlink()
+            chosen_md.rename(final_md)
+
         if debug:
             print(f"[DEBUG] 找到 JSON: {[str(p) for p in json_candidates[:5]]}")
             print(f"[DEBUG] 找到 MD: {[str(p) for p in md_candidates[:5]]}")
+            print(f"[DEBUG] 已规范化为: {final_json}, {final_md}")
 
-        return str(json_candidates[0]), str(md_candidates[0])
+        return str(final_json), str(final_md)

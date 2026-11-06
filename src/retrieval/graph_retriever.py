@@ -28,6 +28,7 @@ import os
 import re
 import shlex
 import subprocess
+import time
 from typing import Dict, List, Optional
 
 from src.utils.graphrag_env import get_python, get_root, index_ready
@@ -74,30 +75,74 @@ class GraphRetriever:
         return [{"type": "graph_error", "message": message, "entities": [], "relations": [], "score": 0.0}]
 
     # ── 检索 ──────────────────────────────────────────────
+    def wait_until_ready(self, timeout: int = 180, poll_interval: float = 3.0) -> bool:
+        """阻塞等待 GraphRAG 索引就绪；只在 ready 后才允许 query。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.is_ready():
+                return True
+            time.sleep(poll_interval)
+        return self.is_ready()
+
     def search(self, query: str, top_k: int = 5, method: Optional[str] = None) -> List[Dict]:
         """
         执行 GraphRAG 查询。top_k 仅为兼容旧接口，GraphRAG 自己决定检索范围。
         返回单元素列表：{"type": "graph_answer", "method", "message"(答案正文), ...}
         失败时返回 {"type": "graph_error", ...}，不抛异常，避免拖垮整个 agent。
         """
+        from src.ingestion.graph_builder import GraphBuilder
+
+        gb = GraphBuilder(root=str(self.root), python=self.python)
+        if gb.is_building():
+            return [{
+                "type": "graph_status",
+                "method": method or self.choose_method(query),
+                "message": "图谱索引正在后台更新中，请稍后再试；针对新增文档进行增量重建时，必须等待索引完成后再查询。",
+                "entities": [],
+                "relations": [],
+                "score": 0.0,
+            }]
+
         if not self.is_ready():
             try:
-                from src.ingestion.graph_builder import GraphBuilder
-                gb = GraphBuilder(root=str(self.root), python=self.python)
                 if gb.list_documents():
                     started = gb.start_index()
                     if started.get("state") == "running":
+                        if self.wait_until_ready(timeout=min(self.timeout, 180), poll_interval=3.0):
+                            pass
+                        else:
+                            return [{
+                                "type": "graph_status",
+                                "method": method or self.choose_method(query),
+                                "message": "图谱索引正在后台构建中，请稍后再试；索引未完成前不执行图谱查询。",
+                                "entities": [],
+                                "relations": [],
+                                "score": 0.0,
+                            }]
+                    else:
                         return [{
                             "type": "graph_status",
                             "method": method or self.choose_method(query),
-                            "message": "图谱索引正在后台构建中，请稍后再试；已自动启动 GraphRAG 索引。",
+                            "message": "图谱索引未启动或没有可用文档，请先完成 PDF 入库并等待索引就绪。",
                             "entities": [],
                             "relations": [],
                             "score": 0.0,
                         }]
+                else:
+                    return self._error("GraphRAG input 目录中没有可索引的 Markdown 文档，请先完成 PDF 入库。")
             except Exception as e:
                 log.warning(f"[GraphRetriever] 自动触发索引失败: {e}")
-            return self._error("图谱索引尚未构建完成（或正在构建中），已自动启动后台索引，请稍后再试，或改用 ES/混合检索。")
+                return self._error("图谱索引尚未构建完成（或正在构建中），已自动启动后台索引，请稍后再试，或改用 ES/混合检索。")
+
+        if gb.is_building() or not self.is_ready():
+            return [{
+                "type": "graph_status",
+                "method": method or self.choose_method(query),
+                "message": "图谱索引仍在后台构建中，请稍后重试。",
+                "entities": [],
+                "relations": [],
+                "score": 0.0,
+            }]
 
         method = method or self.choose_method(query)
         cmd = [self.python, "-m", "graphrag", "query", "--root", str(self.root), "--method", method, "--query", query]

@@ -44,6 +44,8 @@ class DoseInfo:
 class MedicalGuidelineExtractor:
     """医疗指南提取器：支持表格和正文提取
     """
+
+    MAX_TABLE_HTML_LENGTH = 200000
     
     # 配置常量
     DEFAULT_GUIDELINE_YEAR = 1111
@@ -100,7 +102,10 @@ class MedicalGuidelineExtractor:
             
             self._traverse(data)
 
-            # 如果未能从标题提取年份，尝试从文件名提取
+            if not self.source_guideline:
+                self.source_guideline = self._fallback_guideline_name()
+            if self.guideline_year == self.DEFAULT_GUIDELINE_YEAR:
+                self.guideline_year = self._extract_year(self.source_guideline or '')
             if self.guideline_year == self.DEFAULT_GUIDELINE_YEAR:
                 self._extract_year_from_filename()
             
@@ -507,6 +512,17 @@ class MedicalGuidelineExtractor:
             'index': index
         }
         
+    def _fallback_guideline_name(self) -> str:
+        """兜底指南名：优先使用文件名，再使用 PDF 标题中的年版信息。"""
+        filename = os.path.basename(self.json_file_path)
+        stem = os.path.splitext(filename)[0]
+        if stem:
+            stem = stem.replace('MinerU_CN ', '').replace('MinerU_', '')
+            stem = re.sub(r'[_\-]+', ' ', stem).strip()
+            if stem and stem != 'output':
+                return stem
+        return '未知指南'
+
     def _extract_year(self, guideline_name: str) -> int:
         """从指南名称提取年份
         """
@@ -601,16 +617,21 @@ class MedicalGuidelineExtractor:
     
         for table_idx, table in enumerate(self.tables):
             caption = table.get('caption') or ''
+            html = table.get('html') or table.get('content') or ''
 
-            if not table.get('html'):
+            if not html:
                 print(f"  跳过空HTML表格[{table_idx+1}]: {caption[:50]}...")
+                continue
+
+            if len(html) > self.MAX_TABLE_HTML_LENGTH:
+                print(f"  跳过超大表格[{table_idx+1}]：{len(html)} 字符，避免解析卡住")
                 continue
 
             if table.get('is_list_format'):
                 print(f"  跳过列表格式表格[{table_idx+1}]: {caption[:50]}...")
                 continue
 
-            parsed_rows = self._parse_html_table_with_spans(table['html'])
+            parsed_rows = self._parse_html_table_with_spans(html)
             headers = parsed_rows[0] if parsed_rows else []
             if not caption:
                 caption = self._infer_caption_from_html(table['html'])
@@ -677,26 +698,15 @@ class MedicalGuidelineExtractor:
 
     def _parse_html_table_with_spans(self, html: str) -> List[List[str]]:
         """解析HTML表格，正确处理rowspan和colspan
-        
-        Args:
-            html: 表格的HTML字符串
-            
-        Returns:
-            List[List[str]]: 二维列表，每行都包含完整的列数据
-            
-        Example:
-            输入HTML:
-            <table>
-                <tr><td>A</td><td rowspan="2">B</td></tr>
-                <tr><td>C</td></tr>
-            </table>
-            
-            输出:
-            [
-                ['A', 'B'],
-                ['C', 'B']  # ← B被自动填充到第二行
-            ]
+
+        对于极大或高度畸形的 HTML 表格，直接跳过，避免在 PDF 表格解析阶段卡住。
         """
+        if not html or not str(html).strip():
+            return []
+        if len(str(html)) > self.MAX_TABLE_HTML_LENGTH:
+            print(f"[ESExtractor] 表格过大，跳过解析，长度={len(str(html))}")
+            return []
+
         soup = BeautifulSoup(html, 'html.parser')
         rows = soup.find_all('tr')
         

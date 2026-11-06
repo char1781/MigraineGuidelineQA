@@ -111,11 +111,26 @@ class GraphBuilder:
         return sorted(self.input_dir.glob("*.md"))
 
     def add_markdown(self, md_path, guideline_name: Optional[str] = None, year=None) -> Path:
-        """复制 md 到 GraphRAG input/，文件名用 指南名_年份.md（引用来源会显示这个名字）"""
+        """复制 md 到 GraphRAG input/，避免覆盖历史文档，并支持增量索引。"""
         md_path = Path(md_path)
         if not md_path.exists():
             raise FileNotFoundError(f"md 文件不存在: {md_path}")
-        target = self.input_dir / self.doc_filename(guideline_name or md_path.stem, year)
+
+        base_target = self.input_dir / self.doc_filename(guideline_name or md_path.stem, year)
+        target = base_target
+        if target.exists():
+            if target.read_bytes() == md_path.read_bytes():
+                log.info(f"[GraphBuilder] input 中已存在相同文档，跳过复制: {target.name}")
+                return target
+            stem = target.stem
+            suffix = 2
+            while True:
+                candidate = self.input_dir / f"{stem}_{suffix}{target.suffix}"
+                if not candidate.exists():
+                    target = candidate
+                    break
+                suffix += 1
+
         shutil.copyfile(md_path, target)
         log.info(f"[GraphBuilder] 已加入 input: {target.name}")
         return target
@@ -175,10 +190,37 @@ class GraphBuilder:
     def _launch(self) -> Dict:
         if self.exit_file.exists():
             self.exit_file.unlink()
+
+        out_dir = get_output_dir(self.root)
+        has_documents_storage = (out_dir / "documents.parquet").exists()
+        has_any_parquet = out_dir.exists() and any(out_dir.rglob("*.parquet"))
+
+        # GraphRAG 的 standard-update 要求 previous_storage 中必须存在 documents.parquet。
+        # 如果 output 里有别的 parquet，但缺少 documents.parquet，说明上次索引状态残缺，
+        # 不能继续增量更新；必须先清理 output，再按首次标准索引重建。这样不会覆盖 input。
+        if has_any_parquet and not has_documents_storage:
+            log.warning(
+                "[GraphBuilder] output 中存在 parquet，但缺少 documents.parquet；上次索引状态残缺，"
+                "先清理 output 并回退到 standard 首次重建，不覆盖 input 中的历史文档。"
+            )
+            if out_dir.exists():
+                shutil.rmtree(out_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            has_documents_storage = False
+
+        # 额外保护：如果 output 里已经有 documents.parquet，则才允许走 standard-update；
+        # 否则必须强制 standard，保证不会触发 `Could not find documents.parquet in storage!`。 
+        method = "standard-update" if has_documents_storage else "standard"
+        if has_documents_storage:
+            log.info("[GraphBuilder] 使用增量更新模式: standard-update")
+        else:
+            log.info("[GraphBuilder] 使用标准重建模式: standard")
+
         cmd = (
             f"{shlex.quote(self.python)} -m graphrag index --root {shlex.quote(str(self.root))}"
-            f" > {shlex.quote(str(self.log_file))} 2>&1;"
-            f" echo $? > {shlex.quote(str(self.exit_file))}"
+            f" --method {method}"
+            f" > {shlex.quote(str(self.log_file))} 2>&1; "
+            f"status=$?; echo $status > {shlex.quote(str(self.exit_file))}; exit $status"
         )
         env = os.environ.copy()
         env.pop("PYTHONPATH", None)
@@ -218,10 +260,13 @@ class GraphBuilder:
             st = self._launch()
         return {
             **st,
-            "index_ready": index_ready(self.root),
+            "index_ready": index_ready(self.root) and st.get("state") != "running",
             "documents": [p.name for p in self.list_documents()],
             "stats": index_stats(self.root),
         }
+
+    def is_building(self) -> bool:
+        return self.get_status().get("state") == "running"
 
     def tail_log(self, n: int = 30) -> str:
         if not self.log_file.exists():

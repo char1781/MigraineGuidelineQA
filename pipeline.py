@@ -26,6 +26,30 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _trigger_graph_index_for_md(md_path: str, guideline_name: Optional[str] = None, year: Optional[int] = None) -> Dict:
+    """Always preserve GraphRAG history and trigger index in the correct incremental mode."""
+    from src.ingestion.graph_builder import GraphBuilder
+
+    md_file = Path(md_path)
+    if not md_file.exists():
+        return {"status": "skipped", "reason": f"MD文件不存在: {md_path}"}
+
+    final_name = guideline_name or md_file.stem or "未知指南"
+    final_name = final_name if final_name != "未知指南" else md_file.stem or "未知指南"
+    gb = GraphBuilder()
+    target = gb.add_markdown(
+        md_file,
+        guideline_name=final_name,
+        year=year if year not in (None, 1111, 0) else None,
+    )
+    status = gb.start_index()
+    return {
+        "status": "ok",
+        "target": str(target),
+        "graph_status": status,
+    }
+
+
 def run_pipeline_upload(
     pdf_bytes: bytes,
     filename: str,
@@ -50,6 +74,13 @@ def run_pipeline_upload(
     from src.ingestion.mineru_client import MinerUClient
     from src.ingestion.es_review_editor import ESReviewEditor
     from src.ingestion.es_indexer import MedicalGuidelineExtractor
+    from src.utils.kb_metadata import KnowledgeBaseMetadata
+
+    def _safe_guideline_name(source_name: str, fallback_name: Optional[str] = None) -> str:
+        value = (fallback_name or source_name or "未知指南").strip()
+        if value == "未知指南":
+            value = Path(source_name).stem if source_name else "未知指南"
+        return value or "未知指南"
     
     # 步骤1：保存上传的PDF到临时目录
     temp_dir = Path("data/temp")
@@ -71,15 +102,36 @@ def run_pipeline_upload(
     print(f"[Pipeline] ✅ MinerU解析完成")
     print(f"  JSON: {json_path}")
     print(f"  MD:   {md_path}")
+
+    # 先触发 GraphRAG 索引：新增文档必须保留历史、并采用增量更新模式
+    try:
+        result = _trigger_graph_index_for_md(
+            md_path,
+            guideline_name=Path(filename).stem,
+            year=None,
+        )
+        print(f"[Pipeline] GraphRAG input 已更新: {result}")
+    except Exception as e:
+        print(f"[Pipeline] ⚠️ GraphRAG 触发失败: {e}")
     
     # 步骤3：ES提取 → 生成审核数据
     print(f"[Pipeline] 3/6 ES提取...")
     editor = ESReviewEditor()
     review_data = editor.extract_to_reviewable(json_path, MedicalGuidelineExtractor)
     
-    # 生成review_id（基于文件名）
-    review_id = Path(filename).stem
+    guideline_name = _safe_guideline_name(filename, review_data.get("guideline_name"))
+    review_data["guideline_name"] = guideline_name
+    if review_data.get("guideline_year") in (None, 1111, 0):
+        review_data["guideline_year"] = 2024
+    guideline_year = review_data.get("guideline_year") or 2024
+    review_id = editor.make_review_id(filename, guideline_name)
     saved_review_path = editor.save_reviewed_data(review_data, review_id)
+    try:
+        kb_meta = KnowledgeBaseMetadata()
+        kb_meta.add_guideline(guideline_name, int(guideline_year))
+        print(f"[Pipeline] ✅ 知识库元数据已更新: {guideline_name} ({guideline_year})")
+    except Exception as e:
+        print(f"[Pipeline] ⚠️ 更新知识库元数据失败: {e}")
     
     print(f"[Pipeline] ✅ ES提取完成，共 {review_data['extracted_count']} 条记录")
     print(f"  审核数据已保存: {saved_review_path}")
@@ -142,7 +194,9 @@ def run_pipeline_after_review(review_id: str) -> Dict:
 
     def _resolve_md_path(review_data: Dict) -> str:
         candidates = []
-        guideline_name = review_data.get("guideline_name")
+        guideline_name = review_data.get("guideline_name") or "未知指南"
+        if guideline_name == "未知指南":
+            guideline_name = Path(review_data.get("source_file") or "guide").stem or "未知指南"
         if guideline_name:
             candidates.extend([
                 f"data/processed/{guideline_name}.md",
@@ -295,19 +349,18 @@ def _continue_pipeline_after_review(
     print(f"[Pipeline] 6/6 GraphRAG实体抽取（可选，耗时较长）...")
     graph_success = False
     try:
-        if not Path(md_path).exists():
-            raise FileNotFoundError(f"MD文件不存在: {md_path}")
+        guideline_name = review_data.get("guideline_name") or Path(md_path).stem or "未知指南"
+        if guideline_name == "未知指南":
+            guideline_name = Path(review_data.get("source_file") or md_path).stem
 
-        gb = GraphBuilder()
-        target = gb.add_markdown(
+        result = _trigger_graph_index_for_md(
             md_path,
-            guideline_name=review_data.get("guideline_name") or Path(md_path).stem,
-            year=review_data.get("guideline_year") if review_data.get("guideline_year") not in (None, 1111) else None,
+            guideline_name=guideline_name,
+            year=review_data.get("guideline_year") if review_data.get("guideline_year") not in (None, 1111, 0) else None,
         )
-        print(f"[Pipeline] GraphRAG已复制MD到输入目录: {target}")
-        status = gb.start_index()
-        graph_success = bool(status.get("state") == "running" or status.get("state") == "idle")
-        print(f"[Pipeline] ✅ GraphRAG 索引已启动: {status}")
+        graph_success = result.get("status") == "ok"
+        print(f"[Pipeline] GraphRAG已复制MD到输入目录: {result.get('target')}")
+        print(f"[Pipeline] ✅ GraphRAG 索引已启动: {result.get('graph_status')}")
     except Exception as e:
         print(f"[Pipeline] ⚠️ GraphRAG 跳过: {e}")
 

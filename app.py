@@ -405,6 +405,17 @@ def _init_state():
             st.session_state[k] = v
 
 _init_state()
+
+
+def _refresh_kb_list():
+    """从持久化元数据刷新知识库列表，避免上传后前端仍显示暂无指南。"""
+    try:
+        from src.utils.kb_metadata import KnowledgeBaseMetadata
+        st.session_state.kb_list = KnowledgeBaseMetadata().get_all()
+    except Exception:
+        pass
+
+
 # ───────────────────────────────────────────────
 # 统计待审核数量
 # ───────────────────────────────────────────────
@@ -443,6 +454,7 @@ def _render_review_page():
     
     # 真实审核流程
     try:
+        _refresh_kb_list()
         from src.ingestion.es_review_editor import ESReviewEditor
         editor = ESReviewEditor()
         reviews = editor.list_reviews()
@@ -802,6 +814,31 @@ def _parse_tool_call_text(text: str):
 
 
 def _real_answer(query: str) -> dict:
+    mode = st.session_state.get("search_mode", "auto")
+
+    if mode == "es":
+        from src.retrieval.es_retriever import ESRetriever
+        retriever = ESRetriever()
+        results = retriever.search(query, top_k=5)
+        text = retriever.format_context(results)
+        return {"tool": "es", "answer": text, "sources": []}
+
+    if mode == "hybrid":
+        from src.retrieval.vector_retriever import VectorRetriever
+        retriever = VectorRetriever()
+        nodes = retriever.search(query, top_k=5)
+        text = retriever.format_context(nodes)
+        return {"tool": "hybrid", "answer": text, "sources": []}
+
+    if mode == "graph":
+        from src.retrieval.graph_retriever import GraphRetriever
+        retriever = GraphRetriever()
+        results = retriever.search(query, top_k=3)
+        text = retriever.format_context(results)
+        result_type = results[0].get("type") if results else "graph_status"
+        tool = "graph" if result_type == "graph_answer" else "graph"
+        return {"tool": tool, "answer": text, "sources": []}
+
     agent = _load_agent()
     if agent is None:
         return {"tool": "error", "answer": "Agent未能初始化，请检查src/agent/模块", "sources": []}
@@ -975,13 +1012,16 @@ with st.sidebar:
                             )
                             
                             if result["status"] == "pending_review":
+                                _refresh_kb_list()
                                 st.success(f"✅ 已提取 {result['extracted_count']} 条记录")
                                 st.info("📝 请前往 '审核中心' 确认提取结果")
                                 st.session_state.current_page = "review"
                             elif result["status"] == "no_records":
+                                _refresh_kb_list()
                                 st.warning(f"⚠️ 未抽取到有效记录：{result.get('warning') or '请检查 PDF 是否包含药物治疗表格。'}")
                                 st.session_state.current_page = "chat"
                             else:
+                                _refresh_kb_list()
                                 st.success("✅ 入库完成！")
                         except Exception as e:
                             st.error(f"入库失败: {e}")

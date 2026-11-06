@@ -25,6 +25,8 @@ if __package__ is None or __package__ == '':
         sys.path.insert(0, str(project_root))
 
 import json
+import re
+import uuid
 from typing import List, Dict, Optional
 from datetime import datetime
 
@@ -170,6 +172,14 @@ class ESReviewEditor:
             "_original_doc": es_doc,  # 保留完整ES文档，方便重建
         }
     
+    @staticmethod
+    def make_review_id(source_file: str = "", guideline_name: Optional[str] = None) -> str:
+        """生成唯一 review_id，避免文档名相同导致审核记录覆盖。"""
+        file_stem = Path(source_file).stem if source_file else "review"
+        name = (guideline_name or file_stem or "review").strip()
+        safe_name = re.sub(r"[^A-Za-z0-9\u4e00-\u9fa5_-]+", "_", name)[:40] or "review"
+        return f"{safe_name}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{uuid.uuid4().hex[:8]}"
+
     def save_reviewed_data(
         self,
         review_data: Dict,
@@ -186,7 +196,10 @@ class ESReviewEditor:
             保存的文件路径
         """
         if not review_id:
-            review_id = f"review_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            review_id = self.make_review_id(
+                review_data.get("source_file", ""),
+                review_data.get("guideline_name"),
+            )
         
         file_path = self.review_dir / f"{review_id}.json"
         
@@ -206,8 +219,9 @@ class ESReviewEditor:
             return json.load(f)
     
     def list_reviews(self) -> List[Dict]:
-        """列出所有审核记录"""
+        """列出所有审核记录，并去重同名/同年份的重复待审核项。"""
         reviews = []
+        seen = set()
         for file_path in self.review_dir.glob("*.json"):
             try:
                 data = json.loads(file_path.read_text(encoding="utf-8"))
@@ -215,6 +229,10 @@ class ESReviewEditor:
                 review_status = data.get("review_status", "pending")
                 if extracted_count <= 0:
                     continue
+                key = (str(data.get("guideline_name", "未知")), int(data.get("guideline_year", 0) or 0))
+                if key in seen:
+                    continue
+                seen.add(key)
                 reviews.append({
                     "review_id": file_path.stem,
                     "guideline_name": data.get("guideline_name", "未知"),
