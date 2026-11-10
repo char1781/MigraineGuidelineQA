@@ -7,7 +7,7 @@ pipeline.py - 一键入库的统一入口（更新：增加审核环节）
 3. 用户在Streamlit审核页面确认/修改/拒绝每条记录
 4. 审核通过的记录 → 写入ES数据库
 5. MD文件 → ChromaDB向量索引
-6. MD文件 → GraphRAG抽取 → Neo4j
+6. MD文件 → GraphRAG抽取 
 
 运行方式：
 # 方式1：命令行（用于手动测试）
@@ -247,114 +247,66 @@ def run_pipeline_after_review(review_id: str) -> Dict:
     review_data = editor.load_reviewed_data(review_id)
 
     def _resolve_md_path(review_data: Dict) -> str:
-        candidates = []
-        guideline_name = review_data.get("guideline_name") or "未知指南"
-        if guideline_name == "未知指南":
-            guideline_name = Path(review_data.get("source_file") or "guide").stem or "未知指南"
-        if guideline_name:
-            candidates.extend([
-                f"data/processed/{guideline_name}.md",
-                f"data/processed/{guideline_name.replace(' ', '_')}.md",
-            ])
+        # ★ 修复：直接拿上传时保存的绝对路径，绝不瞎猜
+        saved_path = review_data.get("md_path")
+        if saved_path and Path(saved_path).exists():
+            return str(saved_path)
 
-        src_name = review_data.get("source_file")
-        if src_name:
-            stem = Path(src_name).stem
-            candidates.extend([
-                f"data/processed/{stem}.md",
-                f"data/processed/{stem}_full.md",
-                f"data/processed/{stem}_mineru.md",
-            ])
+        # 老数据兼容：只在当前目录确实只有一份 md 时才安全兜底
+        md_files = sorted(Path("data/processed").glob("*.md"))
+        if len(md_files) == 1:
+            return str(md_files[0])
+        
+        # 如果老数据没有 md_path，兜底报错，防止乱建索引
+        raise FileNotFoundError(f"未在审核数据中找到有效的 md_path 记录，无法构建 Chroma 索引。当前记录: {saved_path}，当前 data/processed/*.md 有 {len(md_files)} 份")
 
-        candidates.extend([
-            "data/processed/full.md",
-            "data/processed/*.md",
-        ])
+    # def _resolve_md_path(review_data: Dict) -> str:
+    #     candidates = []
+    #     guideline_name = review_data.get("guideline_name") or "未知指南"
+    #     if guideline_name == "未知指南":
+    #         guideline_name = Path(review_data.get("source_file") or "guide").stem or "未知指南"
+    #     if guideline_name:
+    #         candidates.extend([
+    #             f"data/processed/{guideline_name}.md",
+    #             f"data/processed/{guideline_name.replace(' ', '_')}.md",
+    #         ])
 
-        for cand in candidates:
-            if cand.endswith("*.md"):
-                matches = sorted(Path("data/processed").glob("*.md"))
-                if matches:
-                    return str(matches[0])
-                continue
-            p = Path(cand)
-            if p.exists():
-                return str(p)
+    #     src_name = review_data.get("source_file")
+    #     if src_name:
+    #         stem = Path(src_name).stem
+    #         candidates.extend([
+    #             f"data/processed/{stem}.md",
+    #             f"data/processed/{stem}_full.md",
+    #             f"data/processed/{stem}_mineru.md",
+    #         ])
 
-        matches = sorted(Path("data/processed").rglob("*.md"))
-        if matches:
-            return str(matches[0])
-        raise FileNotFoundError(
-            "未找到可用于 GraphRAG/Chroma 的 MD 文件；需要先确认 MinerU 产物为 full.md 或其它 .md 文件。"
-        )
+    #     candidates.extend([
+    #         "data/processed/full.md",
+    #         "data/processed/*.md",
+    #     ])
+
+    #     for cand in candidates:
+    #         if cand.endswith("*.md"):
+    #             matches = sorted(Path("data/processed").glob("*.md"))
+    #             if matches:
+    #                 return str(matches[0])
+    #             continue
+    #         p = Path(cand)
+    #         if p.exists():
+    #             return str(p)
+
+    #     matches = sorted(Path("data/processed").rglob("*.md"))
+    #     if matches:
+    #         return str(matches[0])
+    #     raise FileNotFoundError(
+    #         "未找到可用于 GraphRAG/Chroma 的 MD 文件；需要先确认 MinerU 产物为 full.md 或其它 .md 文件。"
+    #     )
 
     md_path = _resolve_md_path(review_data)
     return _continue_pipeline_after_review(review_id, "", md_path)
 
 
-# def _continue_pipeline_after_review(
-#     review_id: str,
-#     json_path: str,
-#     md_path: str,
-# ) -> Dict:
-#     """审核后的后续流程（内部函数）"""
-#     from src.ingestion.es_review_editor import ESReviewEditor
-#     from elasticsearch import Elasticsearch
-#     from src.indexing.chroma_indexer import build_chroma_index
-#     # from src.ingestion.graph_builder import build_graph
-    
-#     editor = ESReviewEditor()
-#     review_data = editor.load_reviewed_data(review_id)
-    
-#     # 步骤4：导出审核通过的记录 → 写入ES
-#     print(f"[Pipeline] 4/6 写入ES数据库...")
-#     es_docs = editor.export_to_es_docs(review_data)
-    
-#     es_host = os.getenv("ES_HOST", "http://localhost:9200")
-#     es_index = os.getenv("ES_INDEX", "medical_guidelines")
-#     es_client = Elasticsearch([es_host])
-    
-#     indexed_count = 0
-#     for doc in es_docs:
-#         es_client.index(index=es_index, document=doc)
-#         indexed_count += 1
-    
-#     print(f"[Pipeline] ✅ ES入库完成，写入 {indexed_count} 条文档")
-    
-#     # 步骤5：MD → ChromaDB
-#     print(f"[Pipeline] 5/6 构建ChromaDB向量索引...")
-#     if not Path(md_path).exists():
-#         print(f"[Pipeline] ⚠️ MD文件不存在，跳过向量索引: {md_path}")
-#         chroma_success = False
-#     else:
-#         try:
-#             build_chroma_index(md_path)
-#             chroma_success = True
-#             print(f"[Pipeline] ✅ ChromaDB索引构建完成")
-#         except Exception as e:
-#             print(f"[Pipeline] ❌ ChromaDB索引失败: {e}")
-#             chroma_success = False
-    
-#     # 步骤6：GraphRAG（可选，耗时长）
-#     print(f"[Pipeline] 6/6 GraphRAG实体抽取（可选，耗时较长）...")
-#     graph_success = False
-#     try:
-#         build_graph(md_path)
-#         graph_success = True
-#         print(f"[Pipeline] ✅ GraphRAG抽取完成")
-#     except Exception as e:
-#         print(f"[Pipeline] ⚠️ GraphRAG跳过: {e}")
-    
-#     print(f"\n{'='*60}")
-#     print(f"[Pipeline] ✅ 全部流程完成！")
-#     print(f"{'='*60}")
-    
-#     return {
-#         "status": "success",
-#         "es_indexed": indexed_count,
-#         "chroma_indexed": chroma_success,
-#         "graph_extracted": graph_success,
-#     }
+
 
 def _continue_pipeline_after_review(
     review_id: str,

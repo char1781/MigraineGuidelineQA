@@ -145,7 +145,7 @@ class VectorRetriever:
                 similarity_top_k=5,
                 num_queries=1,
                 mode="reciprocal_rerank",
-                use_async=True,
+                use_async=False,
                 verbose=False,  # 改为False避免调试时输出过多
                 retriever_weights=[0.6, 0.4],  # 原代码权重
             )
