@@ -2,8 +2,6 @@
 src/utils/cache.py
 职责：查询缓存，节省API费用
 
-改动说明：新增模块，原代码中没有缓存机制
-
 测试方法：
 python -c "
 from src.utils.cache import QueryCache

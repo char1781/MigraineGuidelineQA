@@ -2,13 +2,6 @@
 src/agent/tools.py
 职责：定义所有Agent可用的工具
 
-改动说明：
-- 从原代码中拆分出工具定义部分
-- 将knowledge_base_search、web_search等封装为独立模块
-- 逻辑完全保留原代码
-- 【新增】导入src.config配置全局Embedding和LLM模型
-- 【新增】兼容直接运行和模块导入两种方式
-
 测试方法：
 # 方式1：作为模块运行（推荐）
 python -m src.agent.tools
@@ -32,7 +25,7 @@ if __package__ is None or __package__ == '':
 import os
 from typing import List
 
-# 【新增】导入全局配置
+# 导入全局配置
 import src.config
 
 from pydantic import BaseModel, Field
@@ -44,19 +37,17 @@ load_dotenv()
 
 
 class KnowledgeBaseArgs(BaseModel):
-    """知识库检索参数（原代码）"""
+    """知识库检索参数"""
     query: str = Field(description="用户的问题")
 
 
 def query_knowledge_base(query: str) -> str:
     """
-    基于偏头痛医疗指南知识库的智能检索工具（原代码逻辑）
-    
-    改动说明：无，完全保留原代码
+    基于偏头痛医疗指南知识库的智能检索工具
     """
     from src.retrieval import detect_query_type, ESRetriever, VectorRetriever
     
-    # 检查是否偏头痛相关（原代码逻辑）
+    # 检查是否偏头痛相关
     
     query_lower = query.lower()
 
@@ -74,9 +65,9 @@ def query_knowledge_base(query: str) -> str:
             "建议：使用网络搜索工具 (tavily_search) 查找答案。"
         )
     
-    # 使用智能检索路由（原代码逻辑）
+    # 使用智能检索路由
     try:
-        # 【新增】支持通过环境变量切换意图识别策略
+        # 支持通过环境变量切换意图识别策略
         import os
         strategy = os.getenv("INTENT_DETECTION_STRATEGY", "rule")
         # strategy可选值: "rule"(默认,快速), "llm"(准确), "hybrid"(最准确)
@@ -91,7 +82,7 @@ def query_knowledge_base(query: str) -> str:
             if not results:
                 return "⚠️ 知识库中未找到相关信息，建议使用网络搜索工具。"
             
-            # 格式化ES结果（原代码逻辑）
+            # 格式化ES结果
             docs_content = []
             sources = []
             for i, result in enumerate(results, 1):
@@ -100,7 +91,7 @@ def query_knowledge_base(query: str) -> str:
                 content += f"药物: {doc.get('intervention', {}).get('name', 'N/A')}\n"
                 content += f"疾病: {doc.get('disease', 'N/A')}\n"
                 
-                # 提取剂量信息（原代码逻辑）
+                # 提取剂量信息
                 drug_spec = doc.get('intervention', {}).get('modality_specific', {}).get('drug_specific', {})
                 dose = drug_spec.get('dose', {})
                 recommended = dose.get('recommended', {})
@@ -119,19 +110,19 @@ def query_knowledge_base(query: str) -> str:
                         max_text = f"{max_text}{max_unit}"
                     content += f"最大日剂量: {max_text}\n"
                 
-                # 添加证据等级（原代码逻辑）
+                # 添加证据等级
                 evidence = doc.get('evidence', {})
                 if evidence.get('evidence_level'):
                     content += f"证据等级: {evidence['evidence_level']}\n"
                 if evidence.get('recommendation_grade'):
                     content += f"推荐强度: {evidence['recommendation_grade']}\n"
                 
-                # 添加原始文本（原代码逻辑）
+                # 添加原始文本
                 raw_text = doc.get('traceability', {}).get('raw_text_segment', '')
                 if raw_text:
                     content += f"\n原文: {raw_text[:200]}...\n"
                 
-                # 收集来源信息（原代码逻辑）
+                # 收集来源信息
                 source_info = doc.get('source', {})
                 guideline = source_info.get('guideline', '未知指南')
                 year = source_info.get('year', '未知年份')
@@ -139,7 +130,7 @@ def query_knowledge_base(query: str) -> str:
                 
                 docs_content.append(content)
             
-            # 去重来源（原代码逻辑）
+            # 去重来源
             unique_sources = list(dict.fromkeys(sources))
             sources_text = "\n".join([f"  - {s}" for s in unique_sources])
             
@@ -147,7 +138,7 @@ def query_knowledge_base(query: str) -> str:
             return f"📚 知识库检索结果（来自ES数据库）：\n\n{formatted}\n\n📖 信息来源:\n{sources_text}"
         
         else:
-            # BM25+向量混合检索（原代码逻辑）
+            # BM25+向量混合检索
             try:
                 # 方案1：尝试从已有的ChromaDB加载（推荐，不需要指定MD文件）
                 retriever = VectorRetriever()  # 从ChromaDB加载
@@ -155,7 +146,7 @@ def query_knowledge_base(query: str) -> str:
                 if not nodes:
                     return "⚠️ 知识库中未找到相关信息，建议使用网络搜索工具。"
                 
-                # 格式化并返回（原代码逻辑）
+                # 格式化并返回
                 formatted = retriever.format_context(nodes)
                 return f"📚 知识库检索结果：\n\n{formatted}"
             except Exception as e:
@@ -183,7 +174,7 @@ def query_knowledge_base(query: str) -> str:
 
 def get_tools() -> List:
     """
-    获取所有工具列表（原代码逻辑）
+    获取所有工具列表
     
     改动说明：
     - 封装为函数，便于agent_executor调用
@@ -192,7 +183,7 @@ def get_tools() -> List:
     Returns:
         工具列表
     """
-    # 知识库检索工具（原代码）
+    # 知识库检索工具
     knowledge_base_tool = StructuredTool.from_function(
         func=query_knowledge_base,
         name="knowledge_base_search",
@@ -211,7 +202,7 @@ def get_tools() -> List:
         return_direct=False,
     )
     
-    # 网络搜索工具（原代码）
+    # 网络搜索工具
     web_search = TavilySearch(
         max_results=2,
         tavily_api_key=os.getenv("TAVILY_API_KEY"),

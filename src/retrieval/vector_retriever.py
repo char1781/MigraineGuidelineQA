@@ -2,13 +2,6 @@
 src/retrieval/vector_retriever.py
 职责：BM25+向量混合检索，从原代码中拆分出来
 
-改动说明：
-1. 增加了缓存机制（@st.cache_resource），避免每次rerun重建索引
-2. 将原来的全局变量封装成类和函数
-3. 其他逻辑完全保留原代码
-4. 【新增】导入src.config配置全局Embedding和LLM模型
-5. 【新增】兼容直接运行和模块导入两种方式
-
 测试方法：
 # 方式1：作为模块运行（推荐）
 python -m src.retrieval.vector_retriever
@@ -56,7 +49,7 @@ load_dotenv()
 
 
 class VectorRetriever:
-    """BM25+向量混合检索器（原代码逻辑保留）"""
+    """BM25+向量混合检索器"""
     
     def __init__(
         self,
@@ -82,7 +75,7 @@ class VectorRetriever:
         # 确保ChromaDB目录存在
         os.makedirs(self.chroma_path, exist_ok=True)
         
-        # 初始化ChromaDB客户端（原代码逻辑）
+        # 初始化ChromaDB客户端
         try:
             self.chroma_client = chromadb.PersistentClient(path=self.chroma_path)
         except Exception as e:
@@ -138,7 +131,7 @@ class VectorRetriever:
             self.bm25_retriever = None
             print("⚠️ 警告：未提供nodes，BM25检索器不可用")
         
-        # 融合检索器（原代码逻辑）
+        # 融合检索器
         if self.bm25_retriever:
             self.fusion_retriever = QueryFusionRetriever(
                 retrievers=[self.vector_retriever, self.bm25_retriever],
@@ -187,34 +180,6 @@ class VectorRetriever:
         documents = SimpleDirectoryReader(input_files=[str(md_path)]).load_data()
         print(f"[VectorRetriever] 加载了 {len(documents)} 个文档")
         
-        # # HierarchicalNodeParser切分（原代码逻辑）
-        # node_parser = HierarchicalNodeParser.from_defaults(
-        #     chunk_sizes=[1000, 500, 250],
-        #     chunk_overlap=100,
-        #     include_metadata=True,
-        #     include_prev_next_rel=True,
-        # )
-    
-        # nodes = node_parser.get_nodes_from_documents(documents)
-        # print(f"[VectorRetriever] 切分完成，共 {len(nodes)} 个节点")
-        
-        # # 处理超长节点（原代码逻辑）
-        # nodes = self._split_long_nodes(nodes, max_length=2000)
-        # print(f"[VectorRetriever] 后处理后，节点数: {len(nodes)}")
-        
-        # # 检查超长节点（原代码的验证逻辑）
-        # too_long_count = 0
-        # for node in nodes:
-        #     if len(node.text) > 2000:
-        #         too_long_count += 1
-        
-        # if too_long_count > 0:
-        #     print(f"⚠️ 仍有 {too_long_count} 个节点超过2000字符")
-        # else:
-        #     print("✅ 所有节点长度都不超过2000字符")
-        
-        # return nodes
-
          # 1. 先用 MarkdownNodeParser 按 # 标题切分（保持语义段落完整）
         md_parser = MarkdownNodeParser(include_metadata=True, include_prev_next_rel=True)
         md_nodes = md_parser.get_nodes_from_documents(documents)
@@ -236,33 +201,6 @@ class VectorRetriever:
         print(f"[VectorRetriever] 二次细化切分后，共 {len(final_nodes)} 个节点")
         return final_nodes
     
-    # @staticmethod
-    # def _split_long_nodes(nodes: List, max_length: int = 2000) -> List:
-    #     """
-    #     切分超长节点（原split_long_nodes函数逻辑）
-        
-    #     改动说明：无，完全保留原代码
-    #     """
-    #     new_nodes = []
-    #     for node in nodes:
-    #         if len(node.text) > max_length:
-    #             # 使用句子分割器将长节点再次分割
-    #             splitter = SentenceSplitter(
-    #                 chunk_size=500,
-    #                 chunk_overlap=50,
-    #             )
-    #             # 将长节点转换为一个临时文档
-    #             temp_doc = Document(text=node.text, metadata=node.metadata)
-    #             sub_nodes = splitter.get_nodes_from_documents([temp_doc])
-    #             # 将子节点添加到新节点列表
-    #             for sub_node in sub_nodes:
-    #                 sub_node.metadata = node.metadata.copy()
-    #                 sub_node.metadata['re_split'] = True
-    #                 new_nodes.append(sub_node)
-    #         else:
-    #             new_nodes.append(node)
-    #     return new_nodes
-    
     def _build_index(self, nodes: List) -> VectorStoreIndex:
         """
         构建向量索引
@@ -280,14 +218,14 @@ class VectorRetriever:
         # 构建索引（原代码逻辑）
         index = VectorStoreIndex(nodes, storage_context=self.storage_context)
         
-        # 持久化（原代码有这一步）
+        # 持久化
         # self.vector_store.persist(persist_path=self.chroma_path)
         
         return index
     
     def search(self, query: str, top_k: int = 4) -> List:
         """
-        执行混合检索（原retriever.retrieve逻辑）
+        执行混合检索
         
         Args:
             query: 查询文本
@@ -296,7 +234,7 @@ class VectorRetriever:
         Returns:
             节点列表，每个节点有score和content
         """
-        # 动态调整top_k（原代码里retriever初始化时用的similarity_top_k=5）
+        # 动态调整top_k
         self.fusion_retriever.similarity_top_k = top_k
         
         results = self.fusion_retriever.retrieve(query)
@@ -304,9 +242,7 @@ class VectorRetriever:
     
     def format_context(self, nodes: List) -> str:
         """
-        格式化检索结果为上下文（原format_hybrid_context函数）
-        
-        改动说明：无，完全保留原代码
+        格式化检索结果为上下文
         """
         if not nodes:
             return "未找到相关信息"

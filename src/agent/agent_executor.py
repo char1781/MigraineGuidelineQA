@@ -2,12 +2,6 @@
 src/agent/agent_executor.py
 职责：创建和管理LangGraph Agent
 
-改动说明：
-- 从原代码中提取agent创建逻辑
-- 封装为build_agent()函数，便于app.py调用
-- 逻辑完全保留原代码
-- 【新增】兼容直接运行和模块导入两种方式
-
 测试方法：
 # 方式1：作为模块运行
 python -m src.agent.agent_executor
@@ -38,7 +32,7 @@ load_dotenv()
 
 def build_agent():
     """
-    构建Agent执行器（原代码逻辑）
+    构建Agent执行器
     
     改动说明：
     - 封装为函数，便于前端调用
@@ -47,7 +41,7 @@ def build_agent():
     Returns:
         LangGraph Agent实例
     """
-    # 初始化LLM（原代码）
+    # 初始化LLM
     # model = ChatDeepSeek(
     #     model="deepseek-chat",
     #     temperature=0,

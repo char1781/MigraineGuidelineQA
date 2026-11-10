@@ -66,7 +66,11 @@ class KnowledgeBaseMetadata:
         # 检查是否已存在（去重）
         for kb in self.kb_list:
             if kb['name'] == name and kb['year'] == year:
-                return False  # 已存在，不重复添加
+                # 允许覆盖更新最新的 md_file 和 added_at 时间
+                kb.update(extra_info)
+                kb["added_at"] = datetime.now().isoformat()
+                self._save()
+                return False  # 返回 False 表示已存在，但数据已刷新
         
         # 添加新指南
         self.kb_list.append({

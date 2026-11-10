@@ -55,7 +55,7 @@ st.set_page_config(
 )
 
 # ───────────────────────────────────────────────
-# 全局CSS（精简保留）
+# 全局CSS
 # ───────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -246,7 +246,7 @@ def _count_pending_reviews() -> int:
 
 
 # ═══════════════════════════════════════════════
-# ★ 修改点3：审核页 —— 显示前清洗名字/年份
+# 审核页 —— 显示前清洗名字/年份
 # ═══════════════════════════════════════════════
 def _render_review_page():
     st.markdown('<div class="top-bar"><div class="top-bar-icon">📝</div><div><div class="top-bar-title">ES提取结果审核中心</div><div class="top-bar-sub">确认/修改/拒绝每条提取记录</div></div></div>', unsafe_allow_html=True)
@@ -579,23 +579,68 @@ def _real_answer(query: str) -> dict:
         return llm.invoke(prompt).content
 
     # --- 按照 mode 走不同的检索 ---
+    # if mode == "es":
+    #     from src.retrieval.es_retriever import ESRetriever
+    #     retriever = ESRetriever()
+    #     context = retriever.format_context(retriever.search(query, top_k=3))
+    #     return {"tool": "es", "answer": _summarize(context), "sources": ["ES结构化检索"]}
+
+    # if mode == "hybrid":
+    #     from src.retrieval.vector_retriever import VectorRetriever
+    #     try:
+    #         retriever = VectorRetriever()
+    #         context = retriever.format_context(retriever.search(query, top_k=3))
+    #         return {"tool": "hybrid", "answer": _summarize(context), "sources": ["hybrid检索"]}
+    #     except Exception as e:
+    #         print(f"[Hybrid] 检索发生异常: {e}")
+    #         # 如果检索崩溃，返回一个友好的错误提示，防止 Streamlit 红屏
+    #         return {"tool": "error", "answer": f"⚠️ 语义检索服务暂时不可用，请稍后重试。", "sources": []}
+
     if mode == "es":
         from src.retrieval.es_retriever import ESRetriever
         retriever = ESRetriever()
-        context = retriever.format_context(retriever.search(query, top_k=3))
-        return {"tool": "es", "answer": _summarize(context), "sources": ["ES结构化检索"]}
+        results = retriever.search(query, top_k=3)
+        context = retriever.format_context(results)
+        
+        # ★ 提取真实的指南来源
+        sources = []
+        for r in results:
+            doc = r.get('source', {})
+            src_info = doc.get('source', {})
+            guide_name = src_info.get('guideline', '未知指南')
+            year = src_info.get('year')
+            
+            # 清洗一下名字（去 UUID）和年份
+            clean_name = _clean_display_name(guide_name)
+            year_str = f" ({year}版)" if year not in (None, 1111, 0) else ""
+            
+            source_text = f"{clean_name}{year_str}"
+            if source_text not in sources:
+                sources.append(source_text)
+                
+        return {"tool": "es", "answer": _summarize(context), "sources": sources or ["ES结构化检索"]}
 
     if mode == "hybrid":
         from src.retrieval.vector_retriever import VectorRetriever
         try:
             retriever = VectorRetriever()
-            context = retriever.format_context(retriever.search(query, top_k=3))
-            return {"tool": "hybrid", "answer": _summarize(context), "sources": ["hybrid检索"]}
+            nodes = retriever.search(query, top_k=3)
+            context = retriever.format_context(nodes)
+            
+            # ★ 提取真实的指南来源
+            sources = []
+            for n in nodes:
+                # LlamaIndex 读取 MD 时，默认会把文件名存在 metadata["file_name"]
+                file_name = n.metadata.get("file_name", "")
+                if file_name:
+                    clean_name = _clean_display_name(file_name)
+                    if clean_name not in sources:
+                        sources.append(clean_name)
+                        
+            return {"tool": "hybrid", "answer": _summarize(context), "sources": sources or ["hybrid检索"]}
         except Exception as e:
             print(f"[Hybrid] 检索发生异常: {e}")
-            # 如果检索崩溃，返回一个友好的错误提示，防止 Streamlit 红屏
             return {"tool": "error", "answer": f"⚠️ 语义检索服务暂时不可用，请稍后重试。", "sources": []}
-
 
         
     if mode == "graph":
@@ -608,14 +653,14 @@ def _real_answer(query: str) -> dict:
                 raise Exception(results[0].get("message"))
             
             context = retriever.format_context(results)
-            return {"tool": "graph", "answer": _summarize(context), "sources": ["graph检索"]}
+            return {"tool": "graph", "answer": _summarize(context), "sources": ["GraphRAG 跨文档知识图谱"]}
         except Exception as e:
             print(f"[Graph] 发生异常: {e}，熔断降级到 Hybrid 检索")
             from src.retrieval.vector_retriever import VectorRetriever
             retriever_h = VectorRetriever()
             context_h = retriever_h.format_context(retriever_h.search(query, top_k=3))
             fallback_answer = "⚠️ 跨文档图谱服务响应超时/正在构建中，已为您自动降级为本地文档语义检索。\n\n" + _summarize(context_h)
-            return {"tool": "hybrid", "answer": fallback_answer, "sources": ["降级检索"]}
+            return {"tool": "hybrid", "answer": fallback_answer, "sources": ["GraphRAG降级 - 本地语义检索"]}
 
     # 显式的网络搜索分支
     if mode == "web":
@@ -825,6 +870,7 @@ with st.sidebar:
                     <div class="kb-status-ok"></div>
                 </div>""", unsafe_allow_html=True)
             with col2:
+
                 if st.button("🗑", key=f"del_kb_{i}", help="从知识库移除"):
                     kb = st.session_state.kb_list[i]
                     if DEMO_MODE:
@@ -836,12 +882,29 @@ with st.sidebar:
                         with st.spinner(f"正在删除 {disp_name}..."):
                             try:
                                 result = delete_guideline_complete(kb['name'], kb['year'])
-                                msg = f"✅ 已删除 {result['es_deleted']} 条ES文档"
-                                if result.get("warning"):
-                                    msg += f"；⚠️ {result['warning']}"
-                                st.session_state.flash = {"level": "success", "msg": msg}
+                                
+                                # ★ 构造极其详细的清理报告
+                                detail_msg = f"ES清理 {result.get('es_deleted', 0)} 条 | Chroma清理 {result.get('chroma_deleted', 0)} 条"
+                                if result.get("graph_deleted"):
+                                    detail_msg += " | GraphRAG已清理"
+                                else:
+                                    detail_msg += " | ⚠️ 图谱未清理"
+                                
+                                # 保存到 flash 供页面顶部展示
+                                st.session_state.flash = {
+                                    "level": "success", 
+                                    "msg": f"✅ 《{disp_name}》已彻底删除！详情：{detail_msg}"
+                                }
+                                
+                                # ★ 尝试使用 st.toast 弹窗提示 (需 Streamlit 1.25+)
+                                try:
+                                    st.toast(f"🗑️ 已删除 {disp_name}，{detail_msg}", icon="✅")
+                                except AttributeError:
+                                    pass # 如果版本低不支持 toast，则跳过，靠 flash 提示
+                                    
                             except Exception as e:
                                 st.session_state.flash = {"level": "error", "msg": f"删除失败: {e}"}
+                                
                         st.session_state.kb_list.pop(i)
                         st.rerun()
     else:
@@ -957,7 +1020,7 @@ with st.sidebar:
 # 主内容区
 # ═══════════════════════════════════════════════
 
-# ★ 修改点5：flash 提示 + 路由提前
+# flash 提示 + 路由提前
 flash = st.session_state.pop("flash", None)
 if flash:
     _fn = {"success": st.success, "warning": st.warning,
@@ -1028,7 +1091,7 @@ with chat_container:
 # ── 输入区 ──
 st.markdown("<div class='input-area'>", unsafe_allow_html=True)
 
-# 处理示例问题预填（修复 key 冲突）
+# 处理示例问题预填
 if st.session_state.get("example_query"):
     st.session_state.chat_input = st.session_state.pop("example_query")
 

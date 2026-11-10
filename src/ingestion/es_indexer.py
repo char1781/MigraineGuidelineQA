@@ -3786,25 +3786,7 @@ class MedicalGuidelineExtractor:
 # ===== 主程序 =====
 if __name__ == "__main__":
     # 修改为你的JSON文件路径
-    # json_file_path = "/home/fang/Downloads/中国偏头痛诊断与治疗指南2023.json"
-    # json_file_path = "/home/fang/Downloads/中国偏头痛诊治指南2022版.json"
-    # json_file_path = "/home/fang/Downloads/美国医师协会发作性偏头痛门诊药物预防临床指南解读.json"
-    # json_file_path = "/home/fang/Downloads/癫痫共患偏头痛诊断治疗的中国专家共识.json"
-    # json_file_path = "/home/fang/Downloads/MinerU_CN 月经性偏头痛诊断和治疗中国专家共识（2025版）__20260116063557.json"
-    # json_file_path = "/home/fang/Downloads/慢性偏头痛住院患者医疗质量评价与改进专家共识.json"
-    # json_file_path = "/home/fang/Downloads/头痛问诊要领中国专家建议2025版.json"
-    # json_file_path = "/home/fang/Downloads/前庭性偏头痛诊治专家共识2018.json"
-    # json_file_path = "/home/fang/Downloads/儿童偏头痛诊断和治疗进展.json"
-    json_file_path = "/home/fang/Downloads/中国偏头痛中西医结合防治指南2022年.json"
-    # json_file_path = "/home/fang/Downloads/偏头痛医疗质量控制指标中国专家共识第一版.json"
-    # json_file_path = "/home/fang/Downloads/偏头痛与抑郁障碍共病诊治中国专家共识.json"
-    # json_file_path = "/home/fang/Downloads/中国成人偏头痛预防性治疗药物临床对照试验专家共识.json"
-    # json_file_path = "/home/fang/Downloads/中国偏头痛防治指南2016版.json"
-    # json_file_path = "/home/fang/Downloads/中国偏头痛诊治指南患者版2025.json"
-    # json_file_path = "/home/fang/Downloads/中国偏头痛急性期治疗指南第一版2024.json"
-    # json_file_path = "/home/fang/Downloads/偏头痛非药物防治中国专家共识-2021.json"
-    # json_file_path = "/home/fang/Downloads/中国前庭性偏头痛诊治指南（2026版）.json"
-    
+    json_file_path = "/home/Downloads/中国偏头痛中西医结合防治指南2022年.json"
     
     extractor = MedicalGuidelineExtractor(json_file_path)
     

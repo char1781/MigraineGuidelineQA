@@ -18,10 +18,9 @@ from llama_index.llms.ollama import Ollama
 # 加载环境变量
 load_dotenv()
 
-# 让所有 LlamaIndex / NLTK 依赖都使用本地 ~/.nltk_data，避免权限问题导致的 stopwords 缺失
+# NLTK 依赖处理（加 try-except 防止网络卡死）
 nltk_data_dir = Path.home() / "nltk_data"
 nltk_data_dir.mkdir(parents=True, exist_ok=True)
-os.chmod(nltk_data_dir, 0o700)
 os.environ.setdefault("NLTK_DATA", str(nltk_data_dir))
 if str(nltk_data_dir) not in nltk.data.path:
     nltk.data.path.insert(0, str(nltk_data_dir))
@@ -34,7 +33,10 @@ for resource_name, finder_name in [
     try:
         nltk.data.find(finder_name)
     except LookupError:
-        nltk.download(resource_name, download_dir=str(nltk_data_dir), quiet=True)
+        try:
+            nltk.download(resource_name, download_dir=str(nltk_data_dir), quiet=True)
+        except Exception as e:
+            warnings.warn(f"NLTK 下载 {resource_name} 失败，可能影响分词: {e}")
 
 # ═══════════════════════════════════════════════
 # 全局Embedding模型配置

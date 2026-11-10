@@ -2,13 +2,6 @@
 src/indexing/chroma_indexer.py
 职责：从MD文件构建ChromaDB向量索引
 
-改动说明：
-- 从原代码的inline逻辑提取为独立函数
-- 增加了持久化配置，避免每次重建
-- 其他逻辑保留原代码
-- 【新增】导入src.config配置全局Embedding和LLM模型
-- 【新增】兼容直接运行和模块导入两种方式
-
 测试方法：
 # 方式1：作为模块运行（推荐）
 python -m src.indexing.chroma_indexer
@@ -31,7 +24,7 @@ if __package__ is None or __package__ == '':
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-# 【新增】导入全局配置
+# 导入全局配置
 import src.config
 
 from src.retrieval.vector_retriever import VectorRetriever
@@ -43,7 +36,7 @@ def build_chroma_index(
     collection_name: str = "medical_guidelines",
 ) -> VectorRetriever:
     """
-    从MD文件构建ChromaDB向量索引（原代码逻辑封装）
+    从MD文件构建ChromaDB向量索引
     
     Args:
         md_file_path: MD文件路径
@@ -52,10 +45,6 @@ def build_chroma_index(
     
     Returns:
         VectorRetriever实例
-    
-    改动说明：
-    - 这是对原代码中索引构建部分的封装
-    - 逻辑完全保留，只是提取为独立函数便于pipeline调用
     """
     md_path = Path(md_file_path)
     if not md_path.exists():
@@ -63,7 +52,7 @@ def build_chroma_index(
     
     print(f"[ChromaIndexer] 开始构建索引: {md_file_path}")
     
-    # 使用VectorRetriever构建索引（原代码逻辑）
+    # 使用VectorRetriever构建索引
     retriever = VectorRetriever(
         md_file_path=str(md_path),
         chroma_path=chroma_path,

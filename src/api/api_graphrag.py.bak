@@ -5,17 +5,17 @@ GraphRAG 后端API接口
 路径: 添加到你的 main.py 或 app.py 中
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
-from pydantic import BaseModel
-from typing import Optional, List, Literal
-import asyncio
-from pathlib import Path
-import shutil
-import logging
+# from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
+# from pydantic import BaseModel
+# from typing import Optional, List, Literal
+# import asyncio
+# from pathlib import Path
+# import shutil
+# import logging
 
-# 导入你的GraphRAG模块
-from src.ingestion.graph_builder import GraphRAGBuilder
-from src.retrieval.graph_retriever import GraphRAGRetriever
+# # 导入你的GraphRAG模块
+# from src.ingestion.graph_builder import GraphBuilder
+# from src.retrieval.graph_retriever import GraphRetriever
 
 log = logging.getLogger(__name__)
 
@@ -23,16 +23,8 @@ log = logging.getLogger(__name__)
 graphrag_router = APIRouter(prefix="/graphrag", tags=["GraphRAG"])
 
 # 初始化全局对象
-graph_builder = GraphRAGBuilder(
-    graphrag_root="./graphrag-main",
-    cache_dir="./pdf_cache",
-    use_cache=True
-)
-
-graph_retriever = GraphRAGRetriever(
-    graphrag_root="./graphrag-main",
-    default_method="local"
-)
+graph_builder = GraphBuilder(root="./graphrag-main")
+graph_retriever = GraphRetriever(root="./graphrag-main")
 
 
 # ========================================
@@ -138,8 +130,18 @@ async def query_graphrag_multi_method(
     ```
     """
     try:
-        result = await graph_retriever.query_multi_method(question, methods)
-        return result
+        # 利用 run_in_executor 包装同步方法，防止阻塞 FastAPI 事件循环
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(
+            None, 
+            graph_retriever.search, 
+            request.question, 
+            3, 
+            request.method
+)
+        # 把 results 转换一下格式再返回
+        answer = results[0].get("message", "未找到答案") if results else "无结果"
+        return GraphRAGQueryResponse(success=True, answer=answer, method=request.method)
     
     except Exception as e:
         log.error(f"多方法查询失败: {e}")
@@ -389,3 +391,5 @@ if __name__ == "__main__":
     
     # 运行测试服务器
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+

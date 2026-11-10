@@ -126,21 +126,14 @@ def run_pipeline_upload(
         print(f"  JSON: {json_path}")
         print(f"  MD:   {md_path}")
 
-        # ── 步骤2.5：触发 GraphRAG 索引（解析阶段一次，审核后不再重复）──
-        graph_index_status = "unknown"
-        graph_index_reason = ""
+        # ── 在解析阶段，和图谱一起并行触发 Chroma 的构建 ──
         try:
-            graph_result = _trigger_graph_index_for_md(
-                md_path,
-                guideline_name=Path(filename).stem,
-                year=None,   # 函数内部会从 MD 标题/正文/文件名提取
-            )
-            graph_index_status = graph_result.get("status", "unknown")
-            print(f"[Pipeline] GraphRAG input 已更新: {graph_result}")
+            from src.indexing.chroma_indexer import build_chroma_index
+            print(f"[Pipeline] 正在构建 ChromaDB 向量索引...")
+            build_chroma_index(md_path)
+            print(f"[Pipeline] ✅ ChromaDB 索引构建完成")
         except Exception as e:
-            graph_index_status = "error"
-            graph_index_reason = str(e)
-            print(f"[Pipeline] ⚠️ GraphRAG 触发失败: {e}")
+            print(f"[Pipeline] ⚠️ ChromaDB 索引构建失败: {e}")
 
         # ── 步骤3：ES提取 → 生成审核数据 ──
         print(f"[Pipeline] 3/6 ES提取...")
@@ -158,6 +151,22 @@ def run_pipeline_upload(
         )
         review_data["guideline_year"] = resolved_year
 
+        graph_index_status = "unknown"
+        graph_index_reason = ""
+
+        try:
+            graph_result = _trigger_graph_index_for_md(
+                md_path,
+                guideline_name=guideline_name, # 用中文名
+                year=resolved_year,            # 用解析后的真实年份
+            )
+            graph_index_status = graph_result.get("status", "unknown")
+            print(f"[Pipeline] GraphRAG input 已更新: {graph_result}")
+        except Exception as e:
+            graph_index_status = "error"
+            graph_index_reason = str(e)
+            print(f"[Pipeline] ⚠️ GraphRAG 触发失败: {e}")
+
         # 把路径和图谱状态写进 review_data，后续审核完直接用，不再猜路径
         review_data["md_path"] = md_path
         review_data["json_path"] = json_path
@@ -174,7 +183,10 @@ def run_pipeline_upload(
             # 若 add_guideline 签名是 int，这里把 None 兜底为当前年份；
             # 若已改为 Optional[int]，可去掉 or 兜底
             kb_year = resolved_year if resolved_year is not None else 0
-            kb_meta.add_guideline(guideline_name, kb_year)
+
+            # 把真实的 md 文件名传进去，供后面删除时精确定位
+            kb_meta.add_guideline(guideline_name, kb_year, md_file=Path(md_path).name)
+
             if resolved_year is None:
                 print(f"[Pipeline] ⚠️ 无法确定年份，知识库记为未知: {guideline_name}")
             else:
@@ -188,6 +200,8 @@ def run_pipeline_upload(
         # ── 无记录：跳过审核入口 ──
         if review_data.get("extracted_count", 0) <= 0:
             print("[Pipeline] ⚠️ 没有抽取到有效药物剂量记录，跳过审核入口，等待后续修正提取器。")
+            review_data["review_status"] = "completed"
+            editor.save_reviewed_data(review_data, review_id)
             return {
                 "status": "no_records",
                 "review_id": review_id,
@@ -260,48 +274,6 @@ def run_pipeline_after_review(review_id: str) -> Dict:
         # 如果老数据没有 md_path，兜底报错，防止乱建索引
         raise FileNotFoundError(f"未在审核数据中找到有效的 md_path 记录，无法构建 Chroma 索引。当前记录: {saved_path}，当前 data/processed/*.md 有 {len(md_files)} 份")
 
-    # def _resolve_md_path(review_data: Dict) -> str:
-    #     candidates = []
-    #     guideline_name = review_data.get("guideline_name") or "未知指南"
-    #     if guideline_name == "未知指南":
-    #         guideline_name = Path(review_data.get("source_file") or "guide").stem or "未知指南"
-    #     if guideline_name:
-    #         candidates.extend([
-    #             f"data/processed/{guideline_name}.md",
-    #             f"data/processed/{guideline_name.replace(' ', '_')}.md",
-    #         ])
-
-    #     src_name = review_data.get("source_file")
-    #     if src_name:
-    #         stem = Path(src_name).stem
-    #         candidates.extend([
-    #             f"data/processed/{stem}.md",
-    #             f"data/processed/{stem}_full.md",
-    #             f"data/processed/{stem}_mineru.md",
-    #         ])
-
-    #     candidates.extend([
-    #         "data/processed/full.md",
-    #         "data/processed/*.md",
-    #     ])
-
-    #     for cand in candidates:
-    #         if cand.endswith("*.md"):
-    #             matches = sorted(Path("data/processed").glob("*.md"))
-    #             if matches:
-    #                 return str(matches[0])
-    #             continue
-    #         p = Path(cand)
-    #         if p.exists():
-    #             return str(p)
-
-    #     matches = sorted(Path("data/processed").rglob("*.md"))
-    #     if matches:
-    #         return str(matches[0])
-    #     raise FileNotFoundError(
-    #         "未找到可用于 GraphRAG/Chroma 的 MD 文件；需要先确认 MinerU 产物为 full.md 或其它 .md 文件。"
-    #     )
-
     md_path = _resolve_md_path(review_data)
     return _continue_pipeline_after_review(review_id, "", md_path)
 
@@ -332,45 +304,20 @@ def _continue_pipeline_after_review(
 
     indexed_count = 0
     for doc in es_docs:
-        es_client.index(index=es_index, document=doc)
+        es_client.index(
+            index=es_index, 
+            id=doc.get("rule_id"), 
+            document=doc,
+            refresh="wait_for"
+        )
         indexed_count += 1
 
     print(f"[Pipeline] ✅ ES入库完成，写入 {indexed_count} 条文档")
 
-    # 步骤5：MD → ChromaDB
-    print(f"[Pipeline] 5/6 构建ChromaDB向量索引...")
-    if not Path(md_path).exists():
-        print(f"[Pipeline] ⚠️ MD文件不存在，跳过向量索引: {md_path}")
-        chroma_success = False
-    else:
-        try:
-            build_chroma_index(md_path)
-            chroma_success = True
-            print(f"[Pipeline] ✅ ChromaDB索引构建完成")
-        except Exception as e:
-            print(f"[Pipeline] ❌ ChromaDB索引失败: {e}")
-            chroma_success = False
+    # 步骤5：ChromaDB 已在解析阶段构建，此处跳过
+    print(f"[Pipeline] 5/6 ChromaDB 已在解析阶段构建完成，跳过")
+    chroma_success = True
 
-    # # 步骤6：启动 GraphRAG 索引（后台任务）
-    # print(f"[Pipeline] 6/6 GraphRAG实体抽取（可选，耗时较长）...")
-    # graph_success = False
-    # try:
-    #     guideline_name = review_data.get("guideline_name") or Path(md_path).stem or "未知指南"
-    #     if guideline_name == "未知指南":
-    #         guideline_name = Path(review_data.get("source_file") or md_path).stem
-
-    #     result = _trigger_graph_index_for_md(
-    #         md_path,
-    #         guideline_name=guideline_name,
-    #         year=review_data.get("guideline_year") if review_data.get("guideline_year") not in (None, 1111, 0) else None,
-    #     )
-    #     graph_success = result.get("status") == "ok"
-    #     print(f"[Pipeline] GraphRAG已复制MD到输入目录: {result.get('target')}")
-    #     print(f"[Pipeline] ✅ GraphRAG 索引已启动: {result.get('graph_status')}")
-    # except Exception as e:
-    #     print(f"[Pipeline] ⚠️ GraphRAG 跳过: {e}")
-
-    # 步骤6：GraphRAG 已在解析阶段触发，这里跳过
     print(f"[Pipeline] 6/6 GraphRAG 已在解析阶段触发，跳过")
 
 
@@ -382,7 +329,8 @@ def _continue_pipeline_after_review(
         "status": "success",
         "es_indexed": indexed_count,
         "chroma_indexed": chroma_success,
-        "graph_extracted": True,
+        # ★ 从保存的状态里读取真实情况
+        "graph_extracted": review_data.get("graph_index_status") == "ok",
     }
 
 

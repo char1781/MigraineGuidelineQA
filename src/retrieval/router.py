@@ -2,11 +2,6 @@
 src/retrieval/router.py
 职责：智能检索路由，决定使用ES/混合/图谱/网络搜索
 
-改动说明：
-1. 将原来的全局函数封装成可独立导入的模块
-2. 增加了graph类型判断（原代码缺失）
-3. 其他逻辑完全保留原代码
-
 测试方法：
 # 方式1：作为模块运行（推荐）
 python -m src.retrieval.router
@@ -47,7 +42,7 @@ def detect_query_type(query: str) -> Literal["es", "hybrid", "graph", "web"]:
     """
     query_lower = query.lower()
     
-    # ===== 规则1: 剂量相关 → ES（原代码逻辑） =====
+    # ===== 规则1: 剂量相关 → ES =====
     # 中文关键词直接 in
     cn_dose_keywords = ['剂量', '用量', '用法', '每次', '每天', '频率', '每日', '最大',
                         '毫克', '片剂', '药片', 'g/日', 'g/d']
@@ -57,7 +52,7 @@ def detect_query_type(query: str) -> Literal["es", "hybrid", "graph", "web"]:
     if any(kw in query for kw in cn_dose_keywords) or EN_UNIT_RE.search(query):
         return "es"
     
-    # ===== 规则2: 药物名 + 疾病名 → ES（原代码逻辑） =====
+    # ===== 规则2: 药物名 + 疾病名 → ES =====
     drug_patterns = [
         # 原代码里的完整药物列表（保留不变）
         '布洛芬', '阿司匹林', '双氯芬酸', '萘普生', '酮洛芬', 
@@ -104,7 +99,7 @@ def detect_query_type(query: str) -> Literal["es", "hybrid", "graph", "web"]:
     if any(kw in query for kw in structured_keywords):
         return "es"
     
-    # ===== 规则4: 跨文档关联、共病 → Graph（新增，原代码缺失） =====
+    # ===== 规则4: 跨文档关联、共病 → Graph =====
     graph_keywords = [
         '共病', '合并', '同时患有', '并发', '伴有',
         '相互作用', '联合用药', '药物相互作用',

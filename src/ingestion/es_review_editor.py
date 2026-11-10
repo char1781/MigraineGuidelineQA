@@ -239,32 +239,32 @@ class ESReviewEditor:
             return json.load(f)
     
     def list_reviews(self) -> List[Dict]:
-        """列出所有审核记录，并去重同名/同年份的重复待审核项。"""
         reviews = []
-        seen = set()
-        for file_path in self.review_dir.glob("*.json"):
+        review_dir = Path("data/review")
+        if not review_dir.exists():
+            return reviews
+
+        for file_path in review_dir.glob("*.json"):
             try:
                 data = json.loads(file_path.read_text(encoding="utf-8"))
-                extracted_count = int(data.get("extracted_count", 0) or 0)
-                review_status = data.get("review_status", "pending")
-                # 允许“空结果”审核记录也展示出来；这是上传了文档但没有抽到有效记录时的正常状态，
-                # 不能因为 extracted_count == 0 被静默过滤掉，否则前端会看不到该指南。
-                key = (str(data.get("guideline_name", "未知")), int(data.get("guideline_year", 0) or 0))
-                if key in seen:
+                
+                if data.get("review_status") == "completed":
                     continue
-                seen.add(key)
+                    
                 reviews.append({
-                    "review_id": file_path.stem,
-                    "guideline_name": data.get("guideline_name", "未知"),
-                    "guideline_year": data.get("guideline_year", 0),
-                    "extracted_count": extracted_count,
-                    "review_status": review_status,
-                    "created_at": data.get("created_at", ""),
+                    # ★ 修复：直接取文件名（不带后缀），这就是真实的 ID
+                    "review_id": file_path.stem, 
+                    "guideline_name": data.get("guideline_name", "未知指南"),
+                    "guideline_year": data.get("guideline_year", "未知"),
+                    "extracted_count": data.get("extracted_count", 0),
+                    "review_status": data.get("review_status", "pending"),
+                    "md_path": data.get("md_path", ""),
+                    "graph_doc_name": data.get("graph_doc_name", "")
                 })
-            except Exception:
-                continue
-        
-        return sorted(reviews, key=lambda x: x["created_at"], reverse=True)
+            except Exception as e:
+                print(f"读取审核文件失败 {file_path}: {e}")
+                
+        return reviews
     
     def apply_modifications(
         self,
@@ -339,29 +339,35 @@ class ESReviewEditor:
         """
         将审核通过的记录导出为ES文档格式
         只导出 status = 'approved' 或 'modified' 的记录
-        
-        Returns:
-            可直接写入ES的文档列表
         """
+        import copy
         es_docs = []
         
-        for record in review_data["records"]:
-            if record["status"] not in ("approved", "modified"):
+        for rec in review_data.get("records", []):
+            if rec.get("status") not in ("approved", "modified"):
                 continue
-            
-            # 获取原始ES文档
-            original_doc = record.get("_original_doc")
+                
+            original_doc = rec.get("_original_doc")
             if not original_doc:
                 continue
+                
+            # ★ 修复1：使用深拷贝，防止污染原内存数据
+            doc = copy.deepcopy(original_doc)
             
-            # 如果有modifications，应用到ES文档
-            if record.get("modifications"):
-                original_doc = self._apply_modifications_to_es_doc(
-                    original_doc, record["modifications"]
-                )
+            # ★ 修复2：应用用户在前端做的修改（药名、剂量、不良反应等）
+            if rec.get("modifications"):
+                doc = self._apply_modifications_to_es_doc(doc, rec["modifications"])
+                
+            # ★ 修复3：统一覆写来源指南名和年份
+            src = doc.setdefault("source", {})
+            src["guideline"] = review_data.get("guideline_name") or src.get("guideline")
+            year = review_data.get("guideline_year")
+            if year:
+                src["year"] = year
+                src["version"] = f"{year}版"
+                
+            es_docs.append(doc)
             
-            es_docs.append(original_doc)
-        
         return es_docs
     
     def _apply_modifications_to_es_doc(
