@@ -22,6 +22,11 @@ import sys
 from pathlib import Path
 from typing import Literal
 from langchain_openai import ChatOpenAI
+import re
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # 【关键】必须在任何src模块导入之前处理路径
 if __package__ is None or __package__ == '':
@@ -32,11 +37,7 @@ if __package__ is None or __package__ == '':
 
 def detect_query_type(query: str) -> Literal["es", "hybrid", "graph", "web"]:
     """
-    检测查询类型，决定使用哪种检索方式（原代码逻辑）
-    
-    改动说明：
-    1. 增加了graph类型判断（原代码里只有es/hybrid/web）
-    2. 其他逻辑完全保留原代码
+    检测查询类型，决定使用哪种检索方式
     
     Returns:
         "es"     - 使用ES精确检索
@@ -47,11 +48,13 @@ def detect_query_type(query: str) -> Literal["es", "hybrid", "graph", "web"]:
     query_lower = query.lower()
     
     # ===== 规则1: 剂量相关 → ES（原代码逻辑） =====
-    dose_keywords = [
-        '剂量', '用量', '用法', '每次', '每天', '频率', '每日', '最大',
-        'mg', 'g', '毫克', 'ml', 'mL', 'μg', 'mcg', 'IU', 'U', 'mmol', '片', '克'
-    ]
-    if any(kw in query for kw in dose_keywords):
+    # 中文关键词直接 in
+    cn_dose_keywords = ['剂量', '用量', '用法', '每次', '每天', '频率', '每日', '最大',
+                        '毫克', '片剂', '药片', 'g/日', 'g/d']
+    # 英文单位用正则边界
+    EN_UNIT_RE = re.compile(r'\b(mg|g|ml|mL|μg|mcg|IU|U|mmol)\b', re.IGNORECASE)
+
+    if any(kw in query for kw in cn_dose_keywords) or EN_UNIT_RE.search(query):
         return "es"
     
     # ===== 规则2: 药物名 + 疾病名 → ES（原代码逻辑） =====
@@ -96,7 +99,7 @@ def detect_query_type(query: str) -> Literal["es", "hybrid", "graph", "web"]:
     if has_drug and has_disease:
         return "es"
     
-    # ===== 规则3: 结构化字段 → ES（原代码逻辑） =====
+    # ===== 规则3: 结构化字段 → ES =====
     structured_keywords = ['不良反应', '禁忌症', '证据等级', '推荐强度', '给药途径']
     if any(kw in query for kw in structured_keywords):
         return "es"
@@ -105,13 +108,12 @@ def detect_query_type(query: str) -> Literal["es", "hybrid", "graph", "web"]:
     graph_keywords = [
         '共病', '合并', '同时患有', '并发', '伴有',
         '相互作用', '联合用药', '药物相互作用',
-        '对比', '区别', '不同指南', '跨指南',
-        '关联', '关系',
+        '对比', '区别', '不同指南', '跨指南','对比不同'
     ]
     if any(kw in query for kw in graph_keywords):
         return "graph"
     
-    # ===== 规则5: 最新、2026年 → Web（原代码逻辑） =====
+    # ===== 规则5: 最新、2026年 → Web =====
     web_keywords = [
         '最新', '最近', '新发布', '2026', '2027',
         '最新研究', '最新进展', '最新指南',
@@ -119,55 +121,12 @@ def detect_query_type(query: str) -> Literal["es", "hybrid", "graph", "web"]:
     if any(kw in query for kw in web_keywords):
         return "web"
     
-    # ===== 规则6: 其他情况 → 混合检索（原代码逻辑） =====
+    # ===== 规则6: 其他情况 → 混合检索  =====
     return "hybrid"
-
-
-# ── 单元测试 ──
-if __name__ == "__main__":
-    # 测试用例（原代码里的例子 + 新增graph测试）
-    test_cases = [
-        # ES检索
-        ("利扎曲普坦的推荐剂量是多少？", "es"),
-        ("佐米曲普坦每次用量多少mg？", "es"),
-        ("布洛芬有哪些不良反应？", "es"),
-        
-        # 混合检索
-        ("偏头痛急性期有哪些治疗方法？", "hybrid"),
-        ("如何预防偏头痛发作？", "hybrid"),
-        
-        # 图谱检索（新增）
-        ("癫痫共病偏头痛如何用药？", "graph"),
-        ("偏头痛和抑郁的关联用药", "graph"),
-        ("丙戊酸钠在不同指南中的推荐对比", "graph"),
-        
-        # 网络搜索
-        ("2026年最新偏头痛指南有什么更新？", "web"),
-        ("最新的CGRP研究进展", "web"),
-    ]
-    
-    print("=" * 80)
-    print("检索路由测试")
-    print("=" * 80)
-    
-    correct = 0
-    for query, expected in test_cases:
-        result = detect_query_type(query)
-        status = "✅" if result == expected else "❌"
-        print(f"{status} [{result:8s}] (期望:{expected:8s}) {query}")
-        if result == expected:
-            correct += 1
-    
-    print(f"\n准确率: {correct}/{len(test_cases)} = {correct/len(test_cases)*100:.1f}%")
-
-
-# ───────────────────────────────────────────────────────────────
-# 【新增】基于DeepSeek LLM的意图识别（准确率更高）
-# ───────────────────────────────────────────────────────────────
 
 def detect_query_type_llm(query: str, use_cache: bool = True) -> Literal["es", "hybrid", "graph", "web"]:
     """
-    使用DeepSeek LLM进行意图识别（准确率约95%+，比规则方法更准确）
+    使用 LLM进行意图识别（准确率约95%+，比规则方法更准确）
     
     Args:
         query: 用户查询文本
@@ -192,9 +151,6 @@ def detect_query_type_llm(query: str, use_cache: bool = True) -> Literal["es", "
         >>> detect_query_type_llm("癫痫和偏头痛同时发作怎么办？")
         'graph'
     """
-    import os
-    from dotenv import load_dotenv
-    load_dotenv()
     
     # 尝试从缓存加载
     if use_cache:
@@ -210,32 +166,32 @@ def detect_query_type_llm(query: str, use_cache: bool = True) -> Literal["es", "
     # 构造Prompt
     prompt = f"""你是一个医疗问答系统的查询路由器。请判断以下用户查询应该使用哪种检索方式。
 
-检索方式说明：
-1. **es**（ES精确检索）：适用于查询结构化信息，如：
-   - 药物剂量、用量（例："利扎曲普坦的推荐剂量"）
-   - 禁忌症、不良反应（例："佐米曲普坦的禁忌症"）
-   - 证据等级、推荐强度
-   - 包含具体数值、单位的查询（mg、g、ml等）
+                检索方式说明：
+                1. es（ES精确检索）：适用于查询结构化信息，如：
+                - 药物剂量、用量（例："利扎曲普坦的推荐剂量"）
+                - 禁忌症、不良反应（例："佐米曲普坦的禁忌症"）
+                - 证据等级、推荐强度
+                - 包含具体数值、单位的查询（mg、g、ml等）
 
-2. **hybrid**（混合检索：BM25+向量）：适用于语义查询，如：
-   - 治疗方案、治疗方法（例："偏头痛急性期治疗"）
-   - 症状描述、疾病描述
-   - 机制、原理解释
-   - 开放性问题
+                2. hybrid（混合检索：BM25+向量）：适用于语义查询，如：
+                - 治疗方案、治疗方法（例："偏头痛急性期治疗"）
+                - 症状描述、疾病描述
+                - 机制、原理解释
+                - 开放性问题
 
-3. **graph**（图谱检索）：适用于关联查询，如：
-   - 共病用药（例："癫痫合并偏头痛如何用药"）
-   - 药物相互作用（例:"利扎曲普坦和美托洛尔能一起用吗"）
-   - 跨指南关联信息、对比不同指南
+                3. graph（图谱检索）：适用于关联查询，如：
+                - 共病用药（例："癫痫合并偏头痛如何用药"）
+                - 药物相互作用（例:"利扎曲普坦和美托洛尔能一起用吗"）
+                - 跨指南关联信息、对比不同指南
 
-4. **web**（网络搜索）：适用于时效性信息，如：
-   - 最新指南、2026年后的信息
-   - 近期发布、刚更新的内容
+                4. web（网络搜索）：适用于时效性信息，如：
+                - 最新指南、2026年后的信息
+                - 近期发布、刚更新的内容
 
-用户查询：「{query}」
+                用户查询：「{query}」
 
-请只返回一个词：es、hybrid、graph 或 web
-不要有任何解释，只返回检索类型。"""
+                请只返回一个词：es、hybrid、graph 或 web
+                不要有任何解释，只返回检索类型。"""
 
     try:
         # 调用DeepSeek API
@@ -282,6 +238,7 @@ def auto_detect_with_strategy(
 ) -> Literal["es", "hybrid", "graph", "web"]:
     """
     自动检测查询类型，支持多种策略
+    自动路由：默认走 hybrid（规则优先，模糊时调 LLM 兜底）
     
     Args:
         query: 用户查询
@@ -309,7 +266,7 @@ def auto_detect_with_strategy(
         query_lower = query.lower()
         
         # 高置信度场景：包含明确的剂量单位
-        if any(unit in query for unit in ["mg", "g", "ml", "每次", "每日"]):
+        if re.search(r'\b(mg|g|ml|mL|μg|mcg|IU|U|mmol)\b', query, re.IGNORECASE) or any(kw in query for kw in ["每次", "每日"]):
             return rule_result
         
         # 高置信度场景：包含"最新"、年份等明确的时效性关键词
@@ -329,3 +286,97 @@ def auto_detect_with_strategy(
     
     else:  # strategy == "rule"
         return detect_query_type(query)
+
+def rewrite_query_with_history(query: str, history: list) -> str:
+    """结合历史对话重写 Query，解决指代问题"""
+    if not history:
+        return query
+
+    # 如果历史记录的最后一条是用户当前的提问，将其剔除
+    if history and history[-1].get("role") == "user" and history[-1].get("content") == query:
+        history = history[:-1]
+        
+    if not history: # 如果剔除后没历史了（比如是第一句话），直接返回
+        return query
+    
+    # 提取最近 3 轮对话（控制 token）
+    recent_history = history[-3:]
+    history_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent_history])
+    
+    # 如果 query 特别短，或者包含代词，才去重写，过滤不需要重写的对话
+    pronouns = ['它', '他', '她', '这个', '那个', '这药', '那这', '那它']
+    if len(query) > 15 and not any(p in query for p in pronouns):
+        return query
+
+    # 缓存命中
+    cache = None
+    cache_key = f"rewrite_{hash(history_text)}_{query}"
+    try:
+        from src.utils.cache import QueryCache
+        cache = QueryCache(cache_file="data/cache/rewrite_cache.json")
+        cached_result = cache.get(cache_key)
+        if cached_result:
+            return cached_result
+    except Exception:
+        pass
+        
+    llm = ChatOpenAI(
+        model="qwen2.5:14b-instruct-q4_K_M",
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+        api_key="ollama", temperature=0,
+    )
+    prompt = f"""结合历史对话，将用户的当前提问重写为一个独立、完整、不包含代词的检索语句。
+                    如果当前提问已经不包含任何代词，原样返回。
+        历史对话：
+        {history_text}
+
+        当前提问：{query}
+        重写后的检索语句（只输出重写结果，不要解释）："""
+    try:
+        result = llm.invoke(prompt).content.strip()
+        if cache:
+            cache.set(cache_key, result)
+        return result
+    except Exception as e:
+        print(f"⚠️ Query重写失败: {e}")
+        return query
+
+
+# ── 单元测试 ──
+if __name__ == "__main__":
+    # 测试用例（原代码里的例子 + 新增graph测试）
+    test_cases = [
+        # ES检索
+        ("利扎曲普坦的推荐剂量是多少？", "es"),
+        ("佐米曲普坦每次用量多少mg？", "es"),
+        ("布洛芬有哪些不良反应？", "es"),
+        
+        # 混合检索
+        ("偏头痛急性期有哪些治疗方法？", "hybrid"),
+        ("如何预防偏头痛发作？", "hybrid"),
+        
+        # 图谱检索（新增）
+        ("癫痫共病偏头痛如何用药？", "graph"),
+        ("偏头痛和抑郁的关联用药", "graph"),
+        ("丙戊酸钠在不同指南中的推荐对比", "graph"),
+        
+        # 网络搜索
+        ("2026年最新偏头痛指南有什么更新？", "web"),
+        ("最新的CGRP研究进展", "web"),
+    ]
+    
+    print("=" * 80)
+    print("检索路由测试")
+    print("=" * 80)
+    
+    correct = 0
+    for query, expected in test_cases:
+        result = detect_query_type(query)
+        status = "✅" if result == expected else "❌"
+        print(f"{status} [{result:8s}] (期望:{expected:8s}) {query}")
+        if result == expected:
+            correct += 1
+    
+    print(f"\n准确率: {correct}/{len(test_cases)} = {correct/len(test_cases)*100:.1f}%")
+
+

@@ -206,18 +206,18 @@ class ESRetriever:
             year = source.get('year', 'N/A')
             
             context = f"""
-【参考{i}】
-药物：{drug_name}
-疾病：{disease} | 阶段：{phase}
-推荐剂量：{dose_text}
-最大日剂量：{max_text}
-给药频次：{frequency}
-给药途径：{route}
-证据等级：{evidence_level}
-推荐强度：{recommendation_grade}
-常见不良反应：{common_ae}
-来源：{guideline} ({year}年)
-            """
+                    【参考{i}】
+                    药物：{drug_name}
+                    疾病：{disease} | 阶段：{phase}
+                    推荐剂量：{dose_text}
+                    最大日剂量：{max_text}
+                    给药频次：{frequency}
+                    给药途径：{route}
+                    证据等级：{evidence_level}
+                    推荐强度：{recommendation_grade}
+                    常见不良反应：{common_ae}
+                    来源：{guideline} ({year}年)
+                """
             context_parts.append(context.strip())
         
         return "\n\n".join(context_parts)

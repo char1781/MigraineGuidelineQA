@@ -1,143 +1,497 @@
 """
 src/evaluation/ragas_eval.py
-职责：使用RAGAS框架评估RAG系统
-
-评估指标：
-1. Answer Relevancy（回答相关性）：回答是否切中问题
-2. Faithfulness（忠实性）：回答是否忠于检索文档（医疗场景最关键）
-3. Context Precision（上下文精确度）：检索到的文档是否相关
-4. Context Recall（上下文召回率）：是否召回了所有相关信息
-
-数据集要求：
-- 20-30条标注问答对
-- 包含：question, answer, contexts, ground_truth
+职责：使用 RAGAS 评估 RAG 系统，全程使用本地 Ollama 模型（qwen2.5 + bge-m3）
 
 测试方法：
-python -m src.evaluation.ragas_eval
-或
-python src/evaluation/ragas_eval.py
+    python -m src.evaluation.ragas_eval
+    或
+    python src/evaluation/ragas_eval.py
+
+支持 RAGAS 0.2.x / 0.1.x
 """
 
 import sys
 from pathlib import Path
+import math
 
-# 【关键】必须在任何src模块导入之前处理路径
-if __package__ is None or __package__ == '':
+if __package__ is None or __package__ == "":
     project_root = Path(__file__).parent.parent.parent
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-from typing import List, Dict
+import os
 import json
+import warnings
+from typing import List, Dict, Optional
+
+from dotenv import load_dotenv
+load_dotenv()
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning, module="ragas")
+
+# ───────────────────────────────────────────────────────────
+# 本地模型封装（Ollama 兼容 OpenAI API）
+# ───────────────────────────────────────────────────────────
+def _ollama_base() -> str:
+    base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    return base + "/v1"
 
 
+def _build_local_llm():
+    from langchain_openai import ChatOpenAI
+    return ChatOpenAI(
+        model=os.getenv("RAGAS_LLM_MODEL", "qwen2.5:14b-instruct-q4_K_M"),
+        base_url=_ollama_base(),
+        api_key="ollama",
+        temperature=0,
+        timeout=180,
+        max_retries=2,
+    )
+
+
+def _build_local_emb():
+    from langchain_openai import OpenAIEmbeddings
+    return OpenAIEmbeddings(
+        model=os.getenv("RAGAS_EMB_MODEL", "bge-m3"),
+        base_url=_ollama_base(),
+        api_key="ollama",
+        check_embedding_ctx_length=False,
+    )
+
+
+def _wrap_for_ragas(llm, emb):
+    """把 LangChain LLM/Emb 包成 RAGAS 能识别的 Wrapper"""
+    try:
+        from ragas.llms import LangchainLLMWrapper
+        from ragas.embeddings import LangchainEmbeddingsWrapper
+        return LangchainLLMWrapper(llm), LangchainEmbeddingsWrapper(emb)
+    except ImportError:
+        return llm, emb
+
+
+# ───────────────────────────────────────────────────────────
+# 用真实检索 + LLM 生成填充 contexts / answer
+# ───────────────────────────────────────────────────────────
+def _run_retrieval_and_answer(
+    dataset: List[Dict],
+    skip_graph: bool = True,
+    top_k: int = 5,
+) -> List[Dict]:
+    from src.retrieval.router import detect_query_type
+
+    _retrievers = {}
+
+    def get_retriever(t: str):
+        if t in _retrievers:
+            return _retrievers[t]
+        try:
+            if t == "es":
+                from src.retrieval.es_retriever import ESRetriever
+                _retrievers[t] = ESRetriever()
+            elif t == "hybrid":
+                from src.retrieval.vector_retriever import VectorRetriever
+                _retrievers[t] = VectorRetriever()
+            elif t == "graph":
+                from src.retrieval.graph_retriever import GraphRetriever
+                _retrievers[t] = GraphRetriever()
+            else:
+                _retrievers[t] = None
+        except Exception as e:
+            print(f"⚠️ 初始化 {t} 检索器失败: {e}")
+            _retrievers[t] = None
+        return _retrievers[t]
+
+    llm = _build_local_llm()
+
+    for idx, item in enumerate(dataset, 1):
+        q = item.get("question", "")
+        if not q:
+            continue
+
+        # 已填过且非空 → 跳过
+        if item.get("contexts") and item.get("answer"):
+            print(f"[{idx}/{len(dataset)}] 已填充，跳过: {q[:40]}")
+            continue
+
+        retrieval_type = (
+            item.get("metadata", {}).get("expected_retrieval")
+            or detect_query_type(q)
+        )
+
+        # graph 慢 + 返回非原文，评估时跳过
+        if retrieval_type == "graph" and skip_graph:
+            print(f"[{idx}/{len(dataset)}] 跳过 graph: {q[:40]}")
+            item["contexts"] = ["(skipped graph retrieval)"]
+            item["answer"] = "(skipped)"
+            item.setdefault("metadata", {})["skipped"] = True
+            continue
+
+        # web 不走本地检索
+        if retrieval_type == "web":
+            print(f"[{idx}/{len(dataset)}] 跳过 web: {q[:40]}")
+            item["contexts"] = ["(skipped web retrieval)"]
+            item["answer"] = "(skipped)"
+            item.setdefault("metadata", {})["skipped"] = True
+            continue
+
+        print(f"[{idx}/{len(dataset)}] {retrieval_type} 检索: {q[:50]}")
+
+        r = get_retriever(retrieval_type)
+        if r is None:
+            item["contexts"] = []
+            item["answer"] = ""
+            continue
+
+        try:
+            raw_results = r.search(q, top_k=top_k)
+
+            if retrieval_type == "es":
+                contexts = [
+                    x["source"].get("traceability", {}).get("raw_text_segment", "")
+                    for x in raw_results
+                ]
+            elif retrieval_type == "graph":
+                contexts = [x.get("message", "") for x in raw_results]
+            else:  # hybrid
+                contexts = [n.get_content() for n in raw_results]
+
+            contexts = [c for c in contexts if c and len(c.strip()) > 10]
+            item["contexts"] = contexts
+
+            # 用本地 LLM 基于 contexts 生成回答
+            if contexts:
+                ctx_text = "\n\n".join(contexts[:top_k])
+                prompt = (
+                    "你是一个医疗问答助手。请**严格**根据下面提供的《指南原文片段》回答问题。\n"
+                    "规则：\n"
+                    "1. 只能使用片段中明确写出的信息，绝对不要使用你自己的医学常识进行补充。\n"
+                    "2. 如果片段中没有提及所需信息，请直接回答“根据当前资料无法确定”。\n"
+                    "3. 输出尽量简洁，直接提取原文中的事实。\n\n"
+                    f"【指南原文片段】\n{ctx_text}\n\n"
+                    f"【用户问题】\n{q}\n\n"
+                    "【回答】"
+                )
+                try:
+                    item["answer"] = llm.invoke(prompt).content.strip()
+                except Exception as e:
+                    print(f"    ⚠️ 生成回答失败: {e}")
+                    item["answer"] = ""
+            else:
+                item["answer"] = ""
+
+        except Exception as e:
+            print(f"    ⚠️ 检索失败: {e}")
+            item["contexts"] = []
+            item["answer"] = ""
+
+    return dataset
+
+
+# ───────────────────────────────────────────────────────────
+# 主评估类
+# ───────────────────────────────────────────────────────────
 class RAGASEvaluator:
-    """RAGAS评估器（占位实现）"""
-    
+    """RAGAS 评估器（全程本地 Ollama）"""
+
+    METRIC_NAMES = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
+
     def __init__(self, eval_dataset_path: str = "data/eval/eval_dataset.json"):
         self.eval_dataset_path = Path(eval_dataset_path)
         self.dataset = self._load_dataset()
-    
+
+    # ── 数据集加载 ────────────────────────────────────────
     def _load_dataset(self) -> List[Dict]:
-        """
-        加载评估数据集
-        
-        格式：
-        [
-            {
-                "question": "利扎曲普坦的推荐剂量是多少？",
-                "ground_truth": "5-10mg，最大日剂量30mg",
-                "contexts": ["参考文档1", "参考文档2"],  # 真实检索结果
-                "answer": "根据指南..."  # 系统实际回答
-            }
-        ]
-        """
         if not self.eval_dataset_path.exists():
+            print(f"⚠️ 数据集不存在: {self.eval_dataset_path}")
             return []
-        
-        return json.loads(self.eval_dataset_path.read_text(encoding='utf-8'))
-    
-    def evaluate(self) -> Dict[str, float]:
-        """
-        运行评估
-        
-        Returns:
-            {
-                "answer_relevancy": 0.85,
-                "faithfulness": 0.92,
-                "context_precision": 0.78,
-                "context_recall": 0.81,
-                "overall_score": 0.84
-            }
-        """
-        # TODO: 集成RAGAS库
-        # from ragas import evaluate
-        # from ragas.metrics import answer_relevancy, faithfulness, ...
-        
-        # results = evaluate(
-        #     dataset=self.dataset,
-        #     metrics=[answer_relevancy, faithfulness, context_precision, context_recall]
-        # )
-        
-        # 占位返回
-        return {
-            "answer_relevancy": 0.0,
-            "faithfulness": 0.0,
-            "context_precision": 0.0,
-            "context_recall": 0.0,
-            "overall_score": 0.0,
-            "note": "需要标注评估数据集并集成RAGAS库"
-        }
-    
+
+        try:
+            data = json.loads(self.eval_dataset_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            print(f"❌ 数据集 JSON 解析失败: {e}")
+            return []
+
+        if not isinstance(data, list):
+            print(f"❌ 数据集应为 List，实际: {type(data)}")
+            return []
+
+        # 字段校验（不强制 contexts/answer 非空，后续填充）
+        required = {"question", "ground_truth"}
+        for i, item in enumerate(data):
+            missing = required - item.keys()
+            if missing:
+                print(f"⚠️ 第{i}条缺字段: {missing}（跳过该条）")
+                item["_invalid"] = True
+
+        return [x for x in data if not x.get("_invalid")]
+
+    # ── 评估 ─────────────────────────────────────────────
+    def evaluate(
+        self,
+        fill_missing: bool = True,
+        skip_graph: bool = True,
+        sample_limit: Optional[int] = None,
+        save_result: bool = True,
+    ) -> Dict:
+        if not self.dataset:
+            return {"error": "数据集为空或全部无效"}
+
+        print(f"\n{'='*60}")
+        print(f"RAGAS 评估（本地 Ollama）")
+        print(f"{'='*60}")
+        print(f"数据集: {self.eval_dataset_path}（{len(self.dataset)} 条）")
+
+        # 1. 用真实检索 + 本地 LLM 填充
+        if fill_missing:
+            print("\n[步骤1] 填充 contexts / answer...")
+            self.dataset = _run_retrieval_and_answer(
+                self.dataset, skip_graph=skip_graph
+            )
+            filled_path = self.eval_dataset_path.parent / "eval_dataset_filled.json"
+            filled_path.parent.mkdir(parents=True, exist_ok=True)
+            filled_path.write_text(
+                json.dumps(self.dataset, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"✅ 回填数据集已保存: {filled_path}")
+
+        # 2. 过滤有效样本
+        valid = [
+            x for x in self.dataset
+            if x.get("contexts")
+            and x.get("answer")
+            and x.get("ground_truth")
+            and not x.get("metadata", {}).get("skipped")
+            and "(skipped" not in str(x.get("contexts", [""])[0])
+            and "(skipped" not in str(x.get("answer", ""))
+        ]
+        if sample_limit:
+            valid = valid[:sample_limit]
+
+        print(f"\n[步骤2] 有效样本: {len(valid)} / {len(self.dataset)}")
+        if not valid:
+            return {"error": "没有有效样本（contexts/answer 全空）"}
+
+        # 3. 构建本地 LLM / Embeddings
+        print("\n[步骤3] 加载本地模型...")
+        try:
+            from ragas.llms import LangchainLLMWrapper
+            from ragas.embeddings import LangchainEmbeddingsWrapper
+            _llm = LangchainLLMWrapper(_build_local_llm())
+            _emb = LangchainEmbeddingsWrapper(_build_local_emb())
+            print(f"  LLM: qwen2.5:14b-instruct-q4_K_M @ {_ollama_base()}")
+            print(f"  Emb: bge-m3")
+        except ImportError as e:
+            return {"error": f"RAGAS 未安装或缺少依赖: {e}。请执行 pip install ragas datasets"}
+
+        # 4. 导入 RAGAS
+        try:
+            from ragas import evaluate as ragas_evaluate
+            from ragas.metrics import (
+                faithfulness,
+                answer_relevancy,
+                context_precision,
+                context_recall,
+            )
+        except ImportError as e:
+            return {"error": f"RAGAS 导入失败: {e}"}
+
+        # 5. 数据集格式（优先 0.2.x）
+        try:
+            from ragas import EvaluationDataset
+            from ragas.dataset_schema import SingleTurnSample
+            samples = [
+                SingleTurnSample(
+                    user_input=x["question"],
+                    response=x["answer"],
+                    retrieved_contexts=x["contexts"],
+                    reference=x["ground_truth"],
+                )
+                for x in valid
+            ]
+            eval_ds = EvaluationDataset(samples=samples)
+            ragas_version = "0.2.x"
+            print(f"  使用 RAGAS {ragas_version} 数据格式")
+        except ImportError:
+            from datasets import Dataset
+            eval_ds = Dataset.from_dict(
+                {
+                    "question": [x["question"] for x in valid],
+                    "answer": [x["answer"] for x in valid],
+                    "contexts": [x["contexts"] for x in valid],
+                    "ground_truth": [x["ground_truth"] for x in valid],
+                }
+            )
+            ragas_version = "0.1.x"
+            print(f"  使用 RAGAS {ragas_version} 数据格式")
+
+        # 6. 执行评估（重点修改：限制并发 + 防止 NaN 崩溃）
+        print(f"\n[步骤4] 运行 RAGAS 评估（{len(valid)} 条样本，可能需要几分钟）...")
+        metrics = [faithfulness, answer_relevancy, context_precision, context_recall]
+
+        # ★ 修复点1：强制串行（max_workers=1），防止本地 Ollama 爆显存或超时
+        # ★ 修复点2：把超时时间拉长到 600 秒
+        try:
+            from ragas import RunConfig
+            run_config = RunConfig(
+                max_workers=1,     # 本地模型必须设为1，千万别并发
+                timeout=600,       # 单次请求超时 10 分钟
+                max_retries=3,     # 失败重试次数
+            )
+        except ImportError:
+            run_config = None
+
+        try:
+            result = ragas_evaluate(
+                dataset=eval_ds,
+                metrics=metrics,
+                llm=_llm,
+                embeddings=_emb,
+                run_config=run_config,  # 传入配置
+                raise_exceptions=False,
+                show_progress=True,
+            )
+        except TypeError:
+            # 老版本 fallback
+            for m in metrics:
+                try: m.llm = _llm
+                except: pass
+            try: answer_relevancy.embeddings = _emb
+            except: pass
+            result = ragas_evaluate(
+                dataset=eval_ds,
+                metrics=metrics,
+                raise_exceptions=False,
+            )
+
+        # 7. 汇总分数
+        scores = {}
+        try:
+            df = result.to_pandas()
+            for name in self.METRIC_NAMES:
+                if name in df.columns:
+                    # ★ 修复点3：计算均值时忽略 NaN，防止总分被 NaN 污染
+                    col_mean = df[name].mean()
+                    scores[name] = float(col_mean) if not math.isnan(col_mean) else float('nan')
+            
+            # 保存每条样本的分数
+            per_sample_path = self.eval_dataset_path.parent / "eval_per_sample.csv"
+            df.to_csv(per_sample_path, index=False, encoding="utf-8")
+            print(f"✅ 逐条分数已保存: {per_sample_path}")
+        except Exception as e:
+            print(f"⚠️ to_pandas 失败: {e}，尝试 dict(result)")
+            try:
+                scores = {k: float(v) for k, v in dict(result).items() if isinstance(v, (int, float))}
+            except Exception:
+                scores = {}
+
+        # ★ 修复点4：过滤掉 NaN 值再算总分
+        valid_scores = [v for v in scores.values() if isinstance(v, (int, float)) and not math.isnan(v)]
+        scores["overall_score"] = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
+        scores["_n_samples"] = len(valid)
+        scores["_ragas_version"] = ragas_version
+
+        # 8. 保存
+        if save_result:
+            result_path = self.eval_dataset_path.parent / "eval_result.json"
+            # 把 NaN 转为 null 才能写入合法的 JSON
+            clean_scores = {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in scores.items()}
+            result_path.write_text(
+                json.dumps(clean_scores, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"✅ 汇总分数已保存: {result_path}")
+
+        # 9. 打印（★ 修复点5：防止 NaN 导致 int() 报错崩溃）
+        print(f"\n{'='*60}")
+        print(f"RAGAS 评估结果")
+        print(f"{'='*60}")
+        for name in self.METRIC_NAMES:
+            v = scores.get(name)
+            if v is not None and not (isinstance(v, float) and math.isnan(v)):
+                bar = "█" * int(v * 20)
+                print(f"  {name:20s} {v:.3f}  {bar}")
+            else:
+                print(f"  {name:20s} N/A (计算超时或失败)")
+                
+        overall = scores.get("overall_score", 0.0)
+        print(f"  {'overall_score':20s} {overall:.3f}")
+        print(f"  {'样本数':20s} {scores.get('_n_samples', 0)}")
+        print(f"{'='*60}\n")
+
+        return scores
+
+    # ── 模板 ────────────────────────────────────────────
     def create_eval_template(self) -> str:
-        """
-        创建评估数据集模板
-        
-        Returns:
-            JSON模板路径
-        """
         template = [
             {
                 "question": "利扎曲普坦的推荐剂量是多少？",
-                "ground_truth": "5-10mg，每次口服，2小时无效可追加，最大日剂量30mg",
-                "contexts": [],  # 运行检索后填入
-                "answer": "",     # 运行Agent后填入
-                "metadata": {
-                    "category": "剂量查询",
-                    "expected_retrieval": "es"
-                }
+                "ground_truth": "5-10mg，每次口服，2小时无效可追加，24小时最大剂量30mg",
+                "contexts": [],
+                "answer": "",
+                "metadata": {"category": "剂量查询", "expected_retrieval": "es"},
             },
             {
                 "question": "偏头痛急性期有哪些治疗方法？",
-                "ground_truth": "特异性：曲普坦类、地坦类、吉泮类；非特异性：NSAIDs、对乙酰氨基酚",
+                "ground_truth": "特异性：曲普坦类、地坦类、吉泮类；非特异性：NSAIDs（布洛芬、萘普生）、对乙酰氨基酚",
                 "contexts": [],
                 "answer": "",
-                "metadata": {
-                    "category": "治疗方案",
-                    "expected_retrieval": "hybrid"
-                }
+                "metadata": {"category": "治疗方案", "expected_retrieval": "hybrid"},
             },
-            # ... 继续添加到20-30条
+            {
+                "question": "佐米曲普坦有哪些禁忌症？",
+                "ground_truth": "冠心病、脑血管疾病、未控制的高血压等",
+                "contexts": [],
+                "answer": "",
+                "metadata": {"category": "禁忌症", "expected_retrieval": "es"},
+            },
+            {
+                "question": "丙戊酸钠在偏头痛预防中的推荐强度？",
+                "ground_truth": "推荐强度1，证据级别A",
+                "contexts": [],
+                "answer": "",
+                "metadata": {"category": "预防用药", "expected_retrieval": "es"},
+            },
+            {
+                "question": "偏头痛与癫痫共病时如何选择药物？",
+                "ground_truth": "丙戊酸钠兼具抗癫痫与偏头痛预防双重适应症，是首选",
+                "contexts": [],
+                "answer": "",
+                "metadata": {"category": "共病用药", "expected_retrieval": "graph"},
+            },
         ]
-        
+
         output_path = self.eval_dataset_path.parent / "eval_template.json"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
             json.dumps(template, ensure_ascii=False, indent=2),
-            encoding='utf-8'
+            encoding="utf-8",
         )
-        
         return str(output_path)
 
 
-# ── 使用示例 ──
+# ───────────────────────────────────────────────────────────
+# 主入口
+# ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     evaluator = RAGASEvaluator()
-    
-    # 创建评估数据集模板
-    template_path = evaluator.create_eval_template()
-    print(f"✅ 评估数据集模板已创建: {template_path}")
-    print("\n下一步:")
-    print("1. 填充 contexts 和 answer 字段（运行检索和Agent）")
-    print("2. 安装RAGAS: pip install ragas")
-    print("3. 运行评估: evaluator.evaluate()")
+
+    # 数据集不存在 → 自动创建模板并退出
+    if not evaluator.dataset:
+        print("首次运行：未找到数据集，已创建模板供填写：")
+        path = evaluator.create_eval_template()
+        print(f"  → {path}")
+        print("\n请将模板复制为 eval_dataset.json 并补充 ground_truth，然后再次运行。")
+        sys.exit(0)
+
+    # 直接评估（会自动跑检索+LLM 填充）
+    result = evaluator.evaluate(
+        fill_missing=True,
+        skip_graph=True,     # graph 走 subprocess，慢；评估时先跳过
+        sample_limit=None,   # 想快速试就用 3-5 条
+    )
+
+    if "error" in result:
+        print(f"\n❌ 评估失败: {result['error']}")
+        sys.exit(1)

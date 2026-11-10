@@ -44,11 +44,11 @@ if __name__ == "__main__":
 import src.config  # 这会自动配置Settings
 
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, StorageContext
-from llama_index.core.node_parser import HierarchicalNodeParser, SentenceSplitter
+from llama_index.core.node_parser import MarkdownNodeParser, SentenceSplitter
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.retrievers.bm25 import BM25Retriever
 from llama_index.core.retrievers import QueryFusionRetriever
-from llama_index.core import Document
+from llama_index.core.schema import TextNode, Document
 import chromadb
 from dotenv import load_dotenv
 
@@ -117,7 +117,9 @@ class VectorRetriever:
             self.index = self._build_index(self.nodes)
         else:
             # 从已有的ChromaDB加载
-            self.nodes = []  # 注：从ChromaDB加载时nodes为空，但不影响向量检索
+            # self.nodes = []  # 注：从ChromaDB加载时nodes为空，但不影响向量检索
+            # 从已有的 ChromaDB 中提取全部文本，恢复 nodes，用于 BM25
+            self.nodes = self._load_nodes_from_chroma()
             self.index = VectorStoreIndex.from_vector_store(
                 self.vector_store,
                 storage_context=self.storage_context,
@@ -150,13 +152,29 @@ class VectorRetriever:
         else:
             self.fusion_retriever = self.vector_retriever
     
+    def _load_nodes_from_chroma(self) -> List[TextNode]:
+        """从 Chroma 拉取文本重建 nodes"""
+        try:
+            results = self.chroma_collection.get(include=['documents', 'metadatas'])
+            if not results or not results['documents']:
+                return []
+            nodes = []
+            for doc, meta in zip(results['documents'], results['metadatas']):
+                if doc:
+                    nodes.append(TextNode(text=doc, metadata=meta or {}))
+            return nodes
+        except Exception as e:
+            print(f"从 Chroma 恢复 nodes 失败: {e}")
+            return []
+    
     def _build_nodes_from_md(self, md_file_path: str) -> List:
         """
-        从MD文件构建节点（原代码逻辑）
+        从MD文件构建节点
         
         改动说明：
         - 封装为类方法，便于单独测试
         - 逻辑完全保留原代码（HierarchicalNodeParser + split_long_nodes）
+        - 针对纯文本语义的切分（按 Markdown 标题层级）
         """
         md_path = Path(md_file_path)
         if not md_path.exists():
@@ -165,67 +183,89 @@ class VectorRetriever:
         print(f"[VectorRetriever] 加载MD文件: {md_file_path}")
         
         # 使用SimpleDirectoryReader加载（原代码）
+        print(f"[VectorRetriever] 加载MD文件: {md_file_path}")
         documents = SimpleDirectoryReader(input_files=[str(md_path)]).load_data()
         print(f"[VectorRetriever] 加载了 {len(documents)} 个文档")
         
-        # HierarchicalNodeParser切分（原代码逻辑）
-        node_parser = HierarchicalNodeParser.from_defaults(
-            chunk_sizes=[1000, 500, 250],
-            chunk_overlap=100,
-            include_metadata=True,
-            include_prev_next_rel=True,
-        )
-        
-        nodes = node_parser.get_nodes_from_documents(documents)
-        print(f"[VectorRetriever] 切分完成，共 {len(nodes)} 个节点")
-        
-        # 处理超长节点（原代码逻辑）
-        nodes = self._split_long_nodes(nodes, max_length=2000)
-        print(f"[VectorRetriever] 后处理后，节点数: {len(nodes)}")
-        
-        # 检查超长节点（原代码的验证逻辑）
-        too_long_count = 0
-        for node in nodes:
-            if len(node.text) > 2000:
-                too_long_count += 1
-        
-        if too_long_count > 0:
-            print(f"⚠️ 仍有 {too_long_count} 个节点超过2000字符")
-        else:
-            print("✅ 所有节点长度都不超过2000字符")
-        
-        return nodes
+        # # HierarchicalNodeParser切分（原代码逻辑）
+        # node_parser = HierarchicalNodeParser.from_defaults(
+        #     chunk_sizes=[1000, 500, 250],
+        #     chunk_overlap=100,
+        #     include_metadata=True,
+        #     include_prev_next_rel=True,
+        # )
     
-    @staticmethod
-    def _split_long_nodes(nodes: List, max_length: int = 2000) -> List:
-        """
-        切分超长节点（原split_long_nodes函数逻辑）
+        # nodes = node_parser.get_nodes_from_documents(documents)
+        # print(f"[VectorRetriever] 切分完成，共 {len(nodes)} 个节点")
         
-        改动说明：无，完全保留原代码
-        """
-        new_nodes = []
-        for node in nodes:
-            if len(node.text) > max_length:
-                # 使用句子分割器将长节点再次分割
-                splitter = SentenceSplitter(
-                    chunk_size=500,
-                    chunk_overlap=50,
-                )
-                # 将长节点转换为一个临时文档
-                temp_doc = Document(text=node.text, metadata=node.metadata)
-                sub_nodes = splitter.get_nodes_from_documents([temp_doc])
-                # 将子节点添加到新节点列表
-                for sub_node in sub_nodes:
-                    sub_node.metadata = node.metadata.copy()
-                    sub_node.metadata['re_split'] = True
-                    new_nodes.append(sub_node)
+        # # 处理超长节点（原代码逻辑）
+        # nodes = self._split_long_nodes(nodes, max_length=2000)
+        # print(f"[VectorRetriever] 后处理后，节点数: {len(nodes)}")
+        
+        # # 检查超长节点（原代码的验证逻辑）
+        # too_long_count = 0
+        # for node in nodes:
+        #     if len(node.text) > 2000:
+        #         too_long_count += 1
+        
+        # if too_long_count > 0:
+        #     print(f"⚠️ 仍有 {too_long_count} 个节点超过2000字符")
+        # else:
+        #     print("✅ 所有节点长度都不超过2000字符")
+        
+        # return nodes
+
+         # 1. 先用 MarkdownNodeParser 按 # 标题切分（保持语义段落完整）
+        md_parser = MarkdownNodeParser(include_metadata=True, include_prev_next_rel=True)
+        md_nodes = md_parser.get_nodes_from_documents(documents)
+        print(f"[VectorRetriever] 按标题切分后，共 {len(md_nodes)} 个大段")
+        
+        # 2. 如果某个标题下的段落特别长（超过 1200 字符），再用句子切分器兜底
+        # 这样既保证了结构完整，又避免了超长 node 被 embedding 模型截断
+        sentence_splitter = SentenceSplitter(chunk_size=1200, chunk_overlap=100)
+        final_nodes = []
+        
+        for node in md_nodes:
+            # 如果 Markdown 某个标题下文本超过 1200 字符，就强制切分
+            if len(node.text) > 1200:
+                sub_nodes = sentence_splitter.get_nodes_from_documents([Document(text=node.text, metadata=node.metadata)])
+                final_nodes.extend(sub_nodes)
             else:
-                new_nodes.append(node)
-        return new_nodes
+                final_nodes.append(node)
+                
+        print(f"[VectorRetriever] 二次细化切分后，共 {len(final_nodes)} 个节点")
+        return final_nodes
+    
+    # @staticmethod
+    # def _split_long_nodes(nodes: List, max_length: int = 2000) -> List:
+    #     """
+    #     切分超长节点（原split_long_nodes函数逻辑）
+        
+    #     改动说明：无，完全保留原代码
+    #     """
+    #     new_nodes = []
+    #     for node in nodes:
+    #         if len(node.text) > max_length:
+    #             # 使用句子分割器将长节点再次分割
+    #             splitter = SentenceSplitter(
+    #                 chunk_size=500,
+    #                 chunk_overlap=50,
+    #             )
+    #             # 将长节点转换为一个临时文档
+    #             temp_doc = Document(text=node.text, metadata=node.metadata)
+    #             sub_nodes = splitter.get_nodes_from_documents([temp_doc])
+    #             # 将子节点添加到新节点列表
+    #             for sub_node in sub_nodes:
+    #                 sub_node.metadata = node.metadata.copy()
+    #                 sub_node.metadata['re_split'] = True
+    #                 new_nodes.append(sub_node)
+    #         else:
+    #             new_nodes.append(node)
+    #     return new_nodes
     
     def _build_index(self, nodes: List) -> VectorStoreIndex:
         """
-        构建向量索引（原代码逻辑）
+        构建向量索引
         
         改动说明：
         - 增加了节点文本长度检查，避免超过embedding模型限制
@@ -234,18 +274,18 @@ class VectorRetriever:
         # 检查节点长度（原代码有这个检查）
         for node in nodes:
             if len(node.text) > 2048:
-                print(f"⚠️ 警告: 节点文本长度 {len(node.text)} > 2048，已截断")
-                node.text = node.text[:2048]
+                print(f"⚠️ 警告: 节点文本长度 {len(node.text)} > 2048，可能影响 embedding 效果！")
+                # node.text = node.text[:2048]
         
         # 构建索引（原代码逻辑）
         index = VectorStoreIndex(nodes, storage_context=self.storage_context)
         
         # 持久化（原代码有这一步）
-        self.vector_store.persist(persist_path=self.chroma_path)
+        # self.vector_store.persist(persist_path=self.chroma_path)
         
         return index
     
-    def search(self, query: str, top_k: int = 5) -> List:
+    def search(self, query: str, top_k: int = 4) -> List:
         """
         执行混合检索（原retriever.retrieve逻辑）
         

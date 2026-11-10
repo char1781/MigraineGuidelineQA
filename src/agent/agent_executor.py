@@ -32,7 +32,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from src.agent.tools import get_tools
 import os
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 
 load_dotenv()
 

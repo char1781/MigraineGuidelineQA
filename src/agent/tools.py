@@ -57,16 +57,16 @@ def query_knowledge_base(query: str) -> str:
     from src.retrieval import detect_query_type, ESRetriever, VectorRetriever
     
     # 检查是否偏头痛相关（原代码逻辑）
-    migraine_keywords = [
-        '偏头痛', '头痛', 'migraine',
-        '布洛芬', '萘普生', '阿司匹林', '对乙酰氨基酚', '扑热息痛',
-        '利扎曲普坦', '佐米曲普坦', '舒马曲普坦', '那拉曲普坦',
-        '丙戊酸钠', '美托洛尔', '阿米替林', '氟桂利嗪', '拉莫三嗪',
-        '曲坦', '药物', '治疗', '剂量', '用法', '禁忌', '不良反应'
-    ]
     
     query_lower = query.lower()
-    is_relevant = any(kw in query_lower for kw in migraine_keywords)
+
+    disease_keywords = ['偏头痛', '头痛', 'migraine', '偏头疼']
+    drug_keywords = ['布洛芬', '萘普生', '阿司匹林', '对乙酰氨基酚', '扑热息痛',
+            '利扎曲普坦', '佐米曲普坦', '舒马曲普坦', '那拉曲普坦',
+            '丙戊酸钠', '美托洛尔', '阿米替林', '氟桂利嗪', '拉莫三嗪',
+            '曲坦', '药物', '治疗', '剂量', '用法', '禁忌', '不良反应']  
+
+    is_relevant = any(k in query_lower for k in disease_keywords + drug_keywords)
     
     if not is_relevant:
         return (
@@ -223,8 +223,29 @@ def get_tools() -> List:
         from src.retrieval.graph_retriever import GraphRetriever
 
         retriever = GraphRetriever()
-        results = retriever.search(query, top_k=3)
-        return retriever.format_context(results)
+
+        try:
+            retriever.timeout = 300 
+            results = retriever.search(query, top_k=3)
+            
+            # 如果 GraphRAG 内部报错或正在建库，自动抛出异常触发降级
+            if results and results[0].get("type") in ("graph_error", "graph_status"):
+                print(f"[Tool-Graph] 检索不可用: {results[0].get('message')}，触发降级")
+                raise Exception(results[0].get("message"))
+                
+            return retriever.format_context(results)
+            
+        except Exception as e:
+            print(f"[Tool-Graph] 发生异常: {e}，熔断降级到 Hybrid 检索")
+            from src.retrieval.vector_retriever import VectorRetriever
+            
+            # 兜底降级为向量混合检索
+            retriever_h = VectorRetriever()
+            nodes = retriever_h.search(query, top_k=3)
+            
+            answer = "⚠️ 跨文档图谱服务响应超时或正在构建中，已自动降级为本地文档语义检索。\n\n"
+            answer += retriever_h.format_context(nodes)
+            return answer
 
     graph_tool = StructuredTool.from_function(
         func=graph_search_real,

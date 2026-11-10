@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 import os
 from dataclasses import dataclass
 from enum import Enum
+from src.utils.year_utils import extract_year
 
 
 class TreatmentType(Enum):
@@ -91,7 +92,7 @@ class MedicalGuidelineExtractor:
         filename = os.path.basename(json_file_path)
         # 方案1：使用文件名（可读性好）
         self.pdf_id = filename.replace('.json', '').replace('MinerU_CN ', '')
-        # 方案2：使用哈希（唯一性更强）
+        # 方案2：使用哈希（唯一性更强）from src.utils.year_utils import extract_year
         # self.pdf_id = hashlib.md5(filename.encode()).hexdigest()[:16]
         
     def extract_data(self) -> bool:
@@ -134,7 +135,7 @@ class MedicalGuidelineExtractor:
         Args:
             table_item: 表格项   
         Returns:
-            float: 排序键（表格编号）
+            float: 排序键（表格编号）from src.utils.year_utils import extract_year
         """
         caption = table_item.get('caption', '') or ''
         
@@ -526,40 +527,54 @@ class MedicalGuidelineExtractor:
                 return stem
         return '未知指南'
 
+    # def _extract_year(self, guideline_name: str) -> int:
+    #     """从指南名称提取年份
+    #     """
+    #     if not guideline_name:
+    #         return self.DEFAULT_GUIDELINE_YEAR
+        
+    #     # 模式1: 直接匹配4位数字
+    #     match = re.search(r'(\d{4})', guideline_name)
+    #     if match:
+    #         year = int(match.group(1))
+    #         # 验证年份合理性 (1990-2030)
+    #         if 1990 <= year <= 2030:
+    #             return year
+        
+    #     # 模式2: 匹配"年版"格式
+    #     version_match = re.search(r'(\d{4})版', guideline_name)
+    #     if version_match:
+    #         return int(version_match.group(1))
+        
+    #     return self.DEFAULT_GUIDELINE_YEAR
+
+    # def _extract_year_from_filename(self):
+    #     """从文件名提取年份（兜底方案）
+    #     """
+    #     filename = os.path.basename(self.json_file_path)
+    #     year_match = re.search(r'(\d{4})', filename)
+        
+    #     if year_match:
+    #         year = int(year_match.group(1))
+    #         if 1990 <= year <= 2030:
+    #             self.guideline_year = year
+    #             print(f"从文件名提取年份: {self.guideline_year}")
+    #         else:
+    #             print(f"文件名中的年份 {year} 不在合理范围内")
+    #     else:
+    #         print("未能从文件名提取年份")
+
     def _extract_year(self, guideline_name: str) -> int:
-        """从指南名称提取年份
-        """
-        if not guideline_name:
-            return self.DEFAULT_GUIDELINE_YEAR
-        
-        # 模式1: 直接匹配4位数字
-        match = re.search(r'(\d{4})', guideline_name)
-        if match:
-            year = int(match.group(1))
-            # 验证年份合理性 (1990-2030)
-            if 1990 <= year <= 2030:
-                return year
-        
-        # 模式2: 匹配"年版"格式
-        version_match = re.search(r'(\d{4})版', guideline_name)
-        if version_match:
-            return int(version_match.group(1))
-        
-        return self.DEFAULT_GUIDELINE_YEAR
+        """从指南名称提取年份（内部实现改为复用共享工具）"""
+        year = extract_year(guideline_name)
+        return year if year is not None else self.DEFAULT_GUIDELINE_YEAR
 
     def _extract_year_from_filename(self):
-        """从文件名提取年份（兜底方案）
-        """
         filename = os.path.basename(self.json_file_path)
-        year_match = re.search(r'(\d{4})', filename)
-        
-        if year_match:
-            year = int(year_match.group(1))
-            if 1990 <= year <= 2030:
-                self.guideline_year = year
-                print(f"从文件名提取年份: {self.guideline_year}")
-            else:
-                print(f"文件名中的年份 {year} 不在合理范围内")
+        year = extract_year(filename)   # 文件名里也可能是 "xxx2023.json"
+        if year is not None:
+            self.guideline_year = year
+            print(f"从文件名提取年份: {self.guideline_year}")
         else:
             print("未能从文件名提取年份")
     
