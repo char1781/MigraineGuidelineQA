@@ -1,13 +1,7 @@
 """
 src/evaluation/ragas_eval.py
 职责：使用 RAGAS 评估 RAG 系统，全程使用本地 Ollama 模型（qwen2.5 + bge-m3）
-
-测试方法：
-    python -m src.evaluation.ragas_eval
-    或
-    python src/evaluation/ragas_eval.py
-
-支持 RAGAS 0.2.x / 0.1.x
+支持多路路由（ES, Hybrid, Graph, Web），并跑 100 条多维度测试集。
 """
 
 import sys
@@ -45,8 +39,8 @@ def _build_local_llm():
         base_url=_ollama_base(),
         api_key="ollama",
         temperature=0,
-        timeout=180,
-        max_retries=2,
+        timeout=600,      # 10 分钟超时
+        max_retries=3,
     )
 
 
@@ -60,23 +54,12 @@ def _build_local_emb():
     )
 
 
-def _wrap_for_ragas(llm, emb):
-    """把 LangChain LLM/Emb 包成 RAGAS 能识别的 Wrapper"""
-    try:
-        from ragas.llms import LangchainLLMWrapper
-        from ragas.embeddings import LangchainEmbeddingsWrapper
-        return LangchainLLMWrapper(llm), LangchainEmbeddingsWrapper(emb)
-    except ImportError:
-        return llm, emb
-
-
 # ───────────────────────────────────────────────────────────
 # 用真实检索 + LLM 生成填充 contexts / answer
 # ───────────────────────────────────────────────────────────
 def _run_retrieval_and_answer(
     dataset: List[Dict],
-    skip_graph: bool = True,
-    top_k: int = 5,
+    top_k: int = 5, 
 ) -> List[Dict]:
     from src.retrieval.router import detect_query_type
 
@@ -103,71 +86,75 @@ def _run_retrieval_and_answer(
         return _retrievers[t]
 
     llm = _build_local_llm()
+    temp_save_path = Path("data/eval/eval_dataset_100_filled.json")
 
     for idx, item in enumerate(dataset, 1):
-        q = item.get("question", "")
+        q = item.get("query") or item.get("question") or ""
         if not q:
             continue
 
-        # 已填过且非空 → 跳过
         if item.get("contexts") and item.get("answer"):
             print(f"[{idx}/{len(dataset)}] 已填充，跳过: {q[:40]}")
             continue
 
         retrieval_type = (
-            item.get("metadata", {}).get("expected_retrieval")
+            item.get("expected_route") 
+            or item.get("metadata", {}).get("expected_retrieval")
             or detect_query_type(q)
         )
 
-        # graph 慢 + 返回非原文，评估时跳过
-        if retrieval_type == "graph" and skip_graph:
-            print(f"[{idx}/{len(dataset)}] 跳过 graph: {q[:40]}")
-            item["contexts"] = ["(skipped graph retrieval)"]
-            item["answer"] = "(skipped)"
-            item.setdefault("metadata", {})["skipped"] = True
-            continue
-
-        # web 不走本地检索
-        if retrieval_type == "web":
-            print(f"[{idx}/{len(dataset)}] 跳过 web: {q[:40]}")
-            item["contexts"] = ["(skipped web retrieval)"]
-            item["answer"] = "(skipped)"
-            item.setdefault("metadata", {})["skipped"] = True
-            continue
-
         print(f"[{idx}/{len(dataset)}] {retrieval_type} 检索: {q[:50]}")
 
-        r = get_retriever(retrieval_type)
-        if r is None:
-            item["contexts"] = []
-            item["answer"] = ""
-            continue
+        contexts = []
+        answer = ""
 
         try:
-            raw_results = r.search(q, top_k=top_k)
+            # ★ 修复：Web 和本地检索彻底分开，缩进拉平！
+            if retrieval_type == "web":
+                from langchain_tavily import TavilySearch
+                searcher = TavilySearch(max_results=3, tavily_api_key=os.getenv("TAVILY_API_KEY"))
+                res = searcher.invoke(q)
+                
+                if isinstance(res, dict) and "results" in res:
+                    for r in res["results"]:
+                        if isinstance(r, dict) and r.get("content"):
+                            contexts.append(r["content"][:1200])
+                elif isinstance(res, list):
+                    for r in res:
+                        if isinstance(r, dict) and r.get("content"):
+                            contexts.append(r["content"][:1200])
+                else:
+                    contexts = [str(res)[:1200]]
 
-            if retrieval_type == "es":
-                contexts = [
-                    x["source"].get("traceability", {}).get("raw_text_segment", "")
-                    for x in raw_results
-                ]
-            elif retrieval_type == "graph":
-                contexts = [x.get("message", "") for x in raw_results]
-            else:  # hybrid
-                contexts = [n.get_content() for n in raw_results]
+            else:
+                r = get_retriever(retrieval_type)
+                if r is not None:
+                    raw_results = r.search(q, top_k=top_k)
+                    
+                    if retrieval_type == "es":
+                        contexts = [
+                            x["source"].get("traceability", {}).get("raw_text_segment", "")
+                            for x in raw_results
+                        ]
+                    elif retrieval_type == "graph":
+                        contexts = [x.get("message", "") for x in raw_results]
+                    else:  # hybrid
+                        contexts = [n.get_content() for n in raw_results]
 
-            contexts = [c for c in contexts if c and len(c.strip()) > 10]
-            item["contexts"] = contexts
+            # 过滤空值
+            contexts = [c.strip() for c in contexts if c and len(c.strip()) > 10]
+            item["contexts"] = contexts[:top_k]
 
-            # 用本地 LLM 基于 contexts 生成回答
+            # 新的 Prompt：放宽限制，引导提取
             if contexts:
-                ctx_text = "\n\n".join(contexts[:top_k])
+                ctx_text = "\n\n---\n\n".join(contexts)
                 prompt = (
-                    "你是一个医疗问答助手。请**严格**根据下面提供的《指南原文片段》回答问题。\n"
-                    "规则：\n"
-                    "1. 只能使用片段中明确写出的信息，绝对不要使用你自己的医学常识进行补充。\n"
-                    "2. 如果片段中没有提及所需信息，请直接回答“根据当前资料无法确定”。\n"
-                    "3. 输出尽量简洁，直接提取原文中的事实。\n\n"
+                    "你是一个专业的医疗问答助手。请根据下面提供的《指南原文片段》回答用户的问题。\n"
+                    "注意：\n"
+                    "1. 请尽力从提供的文本中提取关键信息来回答问题，不要轻易放弃。\n"
+                    "2. 如果文本中明确包含所需的数据（如剂量、药物名、分期、推荐等级），请直接提取并综合回答。\n"
+                    "3. 只有当所有文本片段中**完全**没有任何相关内容时，才回答“根据当前资料无法确定”。\n"
+                    "4. 请使用自然流畅的语言回答，提取核心事实，忽略无关的不良反应或禁忌症长文本。\n\n"
                     f"【指南原文片段】\n{ctx_text}\n\n"
                     f"【用户问题】\n{q}\n\n"
                     "【回答】"
@@ -181,26 +168,34 @@ def _run_retrieval_and_answer(
                 item["answer"] = ""
 
         except Exception as e:
-            print(f"    ⚠️ 检索失败: {e}")
+            print(f"    ⚠️ 检索/生成失败: {e}")
             item["contexts"] = []
             item["answer"] = ""
 
+        # 断点续传
+        if idx % 5 == 0 or idx == len(dataset):
+            temp_save_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_save_path.write_text(
+                json.dumps(dataset, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"   💾 已自动保存前 {idx} 条回填数据至 {temp_save_path}")
+
     return dataset
+
+
 
 
 # ───────────────────────────────────────────────────────────
 # 主评估类
 # ───────────────────────────────────────────────────────────
 class RAGASEvaluator:
-    """RAGAS 评估器（全程本地 Ollama）"""
-
     METRIC_NAMES = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
 
-    def __init__(self, eval_dataset_path: str = "data/eval/eval_dataset.json"):
+    def __init__(self, eval_dataset_path: str = "data/eval/e2e_dataset_100.json"):
         self.eval_dataset_path = Path(eval_dataset_path)
         self.dataset = self._load_dataset()
 
-    # ── 数据集加载 ────────────────────────────────────────
     def _load_dataset(self) -> List[Dict]:
         if not self.eval_dataset_path.exists():
             print(f"⚠️ 数据集不存在: {self.eval_dataset_path}")
@@ -213,24 +208,19 @@ class RAGASEvaluator:
             return []
 
         if not isinstance(data, list):
-            print(f"❌ 数据集应为 List，实际: {type(data)}")
             return []
 
-        # 字段校验（不强制 contexts/answer 非空，后续填充）
-        required = {"question", "ground_truth"}
-        for i, item in enumerate(data):
-            missing = required - item.keys()
-            if missing:
-                print(f"⚠️ 第{i}条缺字段: {missing}（跳过该条）")
-                item["_invalid"] = True
+        for item in data:
+            if "query" in item and "question" not in item:
+                item["question"] = item["query"]
+            if "ground_truth" not in item:
+                item["ground_truth"] = ""
 
-        return [x for x in data if not x.get("_invalid")]
+        return data
 
-    # ── 评估 ─────────────────────────────────────────────
     def evaluate(
         self,
         fill_missing: bool = True,
-        skip_graph: bool = True,
         sample_limit: Optional[int] = None,
         save_result: bool = True,
     ) -> Dict:
@@ -242,29 +232,19 @@ class RAGASEvaluator:
         print(f"{'='*60}")
         print(f"数据集: {self.eval_dataset_path}（{len(self.dataset)} 条）")
 
-        # 1. 用真实检索 + 本地 LLM 填充
         if fill_missing:
             print("\n[步骤1] 填充 contexts / answer...")
-            self.dataset = _run_retrieval_and_answer(
-                self.dataset, skip_graph=skip_graph
-            )
+            self.dataset = _run_retrieval_and_answer(self.dataset)
             filled_path = self.eval_dataset_path.parent / "eval_dataset_filled.json"
-            filled_path.parent.mkdir(parents=True, exist_ok=True)
             filled_path.write_text(
                 json.dumps(self.dataset, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             print(f"✅ 回填数据集已保存: {filled_path}")
 
-        # 2. 过滤有效样本
         valid = [
             x for x in self.dataset
-            if x.get("contexts")
-            and x.get("answer")
-            and x.get("ground_truth")
-            and not x.get("metadata", {}).get("skipped")
-            and "(skipped" not in str(x.get("contexts", [""])[0])
-            and "(skipped" not in str(x.get("answer", ""))
+            if x.get("contexts") and x.get("answer") and x.get("ground_truth")
         ]
         if sample_limit:
             valid = valid[:sample_limit]
@@ -273,19 +253,15 @@ class RAGASEvaluator:
         if not valid:
             return {"error": "没有有效样本（contexts/answer 全空）"}
 
-        # 3. 构建本地 LLM / Embeddings
         print("\n[步骤3] 加载本地模型...")
         try:
             from ragas.llms import LangchainLLMWrapper
             from ragas.embeddings import LangchainEmbeddingsWrapper
             _llm = LangchainLLMWrapper(_build_local_llm())
             _emb = LangchainEmbeddingsWrapper(_build_local_emb())
-            print(f"  LLM: qwen2.5:14b-instruct-q4_K_M @ {_ollama_base()}")
-            print(f"  Emb: bge-m3")
         except ImportError as e:
-            return {"error": f"RAGAS 未安装或缺少依赖: {e}。请执行 pip install ragas datasets"}
+            return {"error": f"RAGAS 未安装或缺少依赖: {e}。"}
 
-        # 4. 导入 RAGAS
         try:
             from ragas import evaluate as ragas_evaluate
             from ragas.metrics import (
@@ -297,7 +273,6 @@ class RAGASEvaluator:
         except ImportError as e:
             return {"error": f"RAGAS 导入失败: {e}"}
 
-        # 5. 数据集格式（优先 0.2.x）
         try:
             from ragas import EvaluationDataset
             from ragas.dataset_schema import SingleTurnSample
@@ -326,19 +301,12 @@ class RAGASEvaluator:
             ragas_version = "0.1.x"
             print(f"  使用 RAGAS {ragas_version} 数据格式")
 
-        # 6. 执行评估（重点修改：限制并发 + 防止 NaN 崩溃）
-        print(f"\n[步骤4] 运行 RAGAS 评估（{len(valid)} 条样本，可能需要几分钟）...")
+        print(f"\n[步骤4] 运行 RAGAS 评估（{len(valid)} 条样本）...")
         metrics = [faithfulness, answer_relevancy, context_precision, context_recall]
 
-        # ★ 修复点1：强制串行（max_workers=1），防止本地 Ollama 爆显存或超时
-        # ★ 修复点2：把超时时间拉长到 600 秒
         try:
             from ragas import RunConfig
-            run_config = RunConfig(
-                max_workers=1,     # 本地模型必须设为1，千万别并发
-                timeout=600,       # 单次请求超时 10 分钟
-                max_retries=3,     # 失败重试次数
-            )
+            run_config = RunConfig(max_workers=1, timeout=600, max_retries=3)
         except ImportError:
             run_config = None
 
@@ -348,12 +316,11 @@ class RAGASEvaluator:
                 metrics=metrics,
                 llm=_llm,
                 embeddings=_emb,
-                run_config=run_config,  # 传入配置
+                run_config=run_config,
                 raise_exceptions=False,
                 show_progress=True,
             )
         except TypeError:
-            # 老版本 fallback
             for m in metrics:
                 try: m.llm = _llm
                 except: pass
@@ -365,37 +332,31 @@ class RAGASEvaluator:
                 raise_exceptions=False,
             )
 
-        # 7. 汇总分数
         scores = {}
         try:
             df = result.to_pandas()
             for name in self.METRIC_NAMES:
                 if name in df.columns:
-                    # ★ 修复点3：计算均值时忽略 NaN，防止总分被 NaN 污染
                     col_mean = df[name].mean()
                     scores[name] = float(col_mean) if not math.isnan(col_mean) else float('nan')
             
-            # 保存每条样本的分数
             per_sample_path = self.eval_dataset_path.parent / "eval_per_sample.csv"
             df.to_csv(per_sample_path, index=False, encoding="utf-8")
             print(f"✅ 逐条分数已保存: {per_sample_path}")
         except Exception as e:
-            print(f"⚠️ to_pandas 失败: {e}，尝试 dict(result)")
+            print(f"⚠️ to_pandas 失败: {e}")
             try:
                 scores = {k: float(v) for k, v in dict(result).items() if isinstance(v, (int, float))}
             except Exception:
                 scores = {}
 
-        # ★ 修复点4：过滤掉 NaN 值再算总分
         valid_scores = [v for v in scores.values() if isinstance(v, (int, float)) and not math.isnan(v)]
         scores["overall_score"] = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
         scores["_n_samples"] = len(valid)
         scores["_ragas_version"] = ragas_version
 
-        # 8. 保存
         if save_result:
             result_path = self.eval_dataset_path.parent / "eval_result.json"
-            # 把 NaN 转为 null 才能写入合法的 JSON
             clean_scores = {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in scores.items()}
             result_path.write_text(
                 json.dumps(clean_scores, ensure_ascii=False, indent=2),
@@ -403,7 +364,6 @@ class RAGASEvaluator:
             )
             print(f"✅ 汇总分数已保存: {result_path}")
 
-        # 9. 打印（★ 修复点5：防止 NaN 导致 int() 报错崩溃）
         print(f"\n{'='*60}")
         print(f"RAGAS 评估结果")
         print(f"{'='*60}")
@@ -422,76 +382,14 @@ class RAGASEvaluator:
 
         return scores
 
-    # ── 模板 ────────────────────────────────────────────
-    def create_eval_template(self) -> str:
-        template = [
-            {
-                "question": "利扎曲普坦的推荐剂量是多少？",
-                "ground_truth": "5-10mg，每次口服，2小时无效可追加，24小时最大剂量30mg",
-                "contexts": [],
-                "answer": "",
-                "metadata": {"category": "剂量查询", "expected_retrieval": "es"},
-            },
-            {
-                "question": "偏头痛急性期有哪些治疗方法？",
-                "ground_truth": "特异性：曲普坦类、地坦类、吉泮类；非特异性：NSAIDs（布洛芬、萘普生）、对乙酰氨基酚",
-                "contexts": [],
-                "answer": "",
-                "metadata": {"category": "治疗方案", "expected_retrieval": "hybrid"},
-            },
-            {
-                "question": "佐米曲普坦有哪些禁忌症？",
-                "ground_truth": "冠心病、脑血管疾病、未控制的高血压等",
-                "contexts": [],
-                "answer": "",
-                "metadata": {"category": "禁忌症", "expected_retrieval": "es"},
-            },
-            {
-                "question": "丙戊酸钠在偏头痛预防中的推荐强度？",
-                "ground_truth": "推荐强度1，证据级别A",
-                "contexts": [],
-                "answer": "",
-                "metadata": {"category": "预防用药", "expected_retrieval": "es"},
-            },
-            {
-                "question": "偏头痛与癫痫共病时如何选择药物？",
-                "ground_truth": "丙戊酸钠兼具抗癫痫与偏头痛预防双重适应症，是首选",
-                "contexts": [],
-                "answer": "",
-                "metadata": {"category": "共病用药", "expected_retrieval": "graph"},
-            },
-        ]
 
-        output_path = self.eval_dataset_path.parent / "eval_template.json"
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(
-            json.dumps(template, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        return str(output_path)
-
-
-# ───────────────────────────────────────────────────────────
-# 主入口
-# ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    evaluator = RAGASEvaluator()
-
-    # 数据集不存在 → 自动创建模板并退出
+    evaluator = RAGASEvaluator(eval_dataset_path="data/eval/e2e_dataset_100.json")
     if not evaluator.dataset:
-        print("首次运行：未找到数据集，已创建模板供填写：")
-        path = evaluator.create_eval_template()
-        print(f"  → {path}")
-        print("\n请将模板复制为 eval_dataset.json 并补充 ground_truth，然后再次运行。")
-        sys.exit(0)
+        print("❌ 未找到 100 条数据集，请检查路径。")
+        sys.exit(1)
 
-    # 直接评估（会自动跑检索+LLM 填充）
-    result = evaluator.evaluate(
-        fill_missing=True,
-        skip_graph=True,     # graph 走 subprocess，慢；评估时先跳过
-        sample_limit=None,   # 想快速试就用 3-5 条
-    )
-
+    result = evaluator.evaluate(fill_missing=True, sample_limit=None)
     if "error" in result:
         print(f"\n❌ 评估失败: {result['error']}")
         sys.exit(1)

@@ -308,9 +308,13 @@ def _continue_pipeline_after_review(
             index=es_index, 
             id=doc.get("rule_id"), 
             document=doc,
-            refresh="wait_for"
+            # refresh="wait_for"
         )
         indexed_count += 1
+
+    # 循环结束后，统一强制刷新一次，保证前端能瞬间搜到
+    if indexed_count > 0:
+        es_client.indices.refresh(index=es_index)
 
     print(f"[Pipeline] ✅ ES入库完成，写入 {indexed_count} 条文档")
 
