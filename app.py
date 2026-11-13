@@ -294,63 +294,159 @@ def _render_review_page():
         st.error("审核模块未找到，请检查 src/ingestion/es_review_editor.py")
 
 
-def _render_review_page_demo():
-    st.markdown("### 📋 中国偏头痛诊治指南2022版 - 提取结果审核")
-    st.info("⚡ Demo模式：这是模拟数据，不调用真实API")
+# def _render_review_page_demo():
+#     st.markdown("### 📋 中国偏头痛诊治指南2022版 - 提取结果审核")
+#     st.info("⚡ Demo模式：这是模拟数据，不调用真实API")
 
-    demo_records = [
-        {"id": "rec_001", "drug_name": "利扎曲普坦", "phase": "急性期",
-         "dose_recommended": "5-10mg", "dose_max_daily": "30mg/日",
-         "evidence_level": "A", "recommendation_grade": "1", "source_table": "表3"},
-        {"id": "rec_002", "drug_name": "佐米曲普坦", "phase": "急性期",
-         "dose_recommended": "2.5-5mg", "dose_max_daily": "10mg/日",
-         "evidence_level": "A", "recommendation_grade": "1", "source_table": "表3"},
-    ]
+#     demo_records = [
+#         {"id": "rec_001", "drug_name": "利扎曲普坦", "phase": "急性期",
+#          "dose_recommended": "5-10mg", "dose_max_daily": "30mg/日",
+#          "evidence_level": "A", "recommendation_grade": "1", "source_table": "表3"},
+#         {"id": "rec_002", "drug_name": "佐米曲普坦", "phase": "急性期",
+#          "dose_recommended": "2.5-5mg", "dose_max_daily": "10mg/日",
+#          "evidence_level": "A", "recommendation_grade": "1", "source_table": "表3"},
+#     ]
 
-    for rec in demo_records:
-        with st.container():
-            st.markdown(f"""
-            <div style="background:var(--bg-card); padding:14px; border-radius:10px; border:1px solid var(--border); margin:10px 0;">
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <div>
-                        <div style="font-size:1rem; font-weight:600; color:var(--text-main);">💊 {rec['drug_name']}</div>
-                        <div style="font-size:0.8rem; color:var(--text-sub); margin-top:4px;">{rec['phase']} | {rec['source_table']}</div>
-                    </div>
-                    <div style="font-size:0.75rem; color:var(--text-muted); font-family:'JetBrains Mono',monospace;">
-                        {rec['evidence_level']} / {rec['recommendation_grade']}
-                    </div>
-                </div>
-                <div style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
-                    <div style="font-size:0.85rem; color:var(--text-sub);">
-                        推荐剂量: <span style="color:var(--accent-blue); font-weight:600;">{rec['dose_recommended']}</span>
-                        &nbsp;|&nbsp; 最大剂量: <span style="color:var(--accent-red);">{rec['dose_max_daily']}</span>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+#     for rec in demo_records:
+#         with st.container():
+#             st.markdown(f"""
+#             <div style="background:var(--bg-card); padding:14px; border-radius:10px; border:1px solid var(--border); margin:10px 0;">
+#                 <div style="display:flex; justify-content:space-between; align-items:center;">
+#                     <div>
+#                         <div style="font-size:1rem; font-weight:600; color:var(--text-main);">💊 {rec['drug_name']}</div>
+#                         <div style="font-size:0.8rem; color:var(--text-sub); margin-top:4px;">{rec['phase']} | {rec['source_table']}</div>
+#                     </div>
+#                     <div style="font-size:0.75rem; color:var(--text-muted); font-family:'JetBrains Mono',monospace;">
+#                         {rec['evidence_level']} / {rec['recommendation_grade']}
+#                     </div>
+#                 </div>
+#                 <div style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
+#                     <div style="font-size:0.85rem; color:var(--text-sub);">
+#                         推荐剂量: <span style="color:var(--accent-blue); font-weight:600;">{rec['dose_recommended']}</span>
+#                         &nbsp;|&nbsp; 最大剂量: <span style="color:var(--accent-red);">{rec['dose_max_daily']}</span>
+#                     </div>
+#                 </div>
+#             </div>
+#             """, unsafe_allow_html=True)
 
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                if st.button("✅ 批准", key=f"approve_{rec['id']}", use_container_width=True):
-                    st.success(f"已批准 {rec['drug_name']}")
-            with col2:
-                if st.button("✏️ 修改", key=f"edit_{rec['id']}", use_container_width=True):
-                    st.info("Demo模式：修改功能仅演示")
-            with col3:
-                if st.button("❌ 拒绝", key=f"reject_{rec['id']}", use_container_width=True):
-                    st.warning(f"已拒绝 {rec['drug_name']}")
+#             col1, col2, col3 = st.columns(3)
+#             with col1:
+#                 if st.button("✅ 批准", key=f"approve_{rec['id']}", use_container_width=True):
+#                     st.success(f"已批准 {rec['drug_name']}")
+#             with col2:
+#                 if st.button("✏️ 修改", key=f"edit_{rec['id']}", use_container_width=True):
+#                     st.info("Demo模式：修改功能仅演示")
+#             with col3:
+#                 if st.button("❌ 拒绝", key=f"reject_{rec['id']}", use_container_width=True):
+#                     st.warning(f"已拒绝 {rec['drug_name']}")
 
-    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+#     st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-    col_finish, col_cancel = st.columns(2)
-    with col_finish:
-        if st.button("🎉 完成审核，写入ES", key="finish_review_demo", use_container_width=True, type="primary"):
-            st.success("✅ Demo模式：审核已完成（模拟）")
-    with col_cancel:
-        if st.button("🚫 取消", key="cancel_review_demo", use_container_width=True):
-            st.session_state.current_page = "chat"
-            st.rerun()
+#     col_finish, col_cancel = st.columns(2)
+#     with col_finish:
+#         if st.button("🎉 完成审核，写入ES", key="finish_review_demo", use_container_width=True, type="primary"):
+#             st.success("✅ Demo模式：审核已完成（模拟）")
+#     with col_cancel:
+#         if st.button("🚫 取消", key="cancel_review_demo", use_container_width=True):
+#             st.session_state.current_page = "chat"
+#             st.rerun()
 
+
+# def _render_review_detail(editor, review_id: str):
+#     review_data = editor.load_reviewed_data(review_id)
+
+#     if review_data.get("extracted_count", 0) <= 0 or not review_data.get("records"):
+#         st.warning("⚠️ 该指南没有抽取到有效的药物剂量记录，不能进入审核流程。请检查 PDF 是否含药物表格，或修正 MinerU/ES 提取器。")
+#         if st.button("← 返回审核列表", key=f"back_review_list_{review_id}"):
+#             st.session_state.pop("current_review_id", None)
+#             st.rerun()
+#         return
+
+#     # ★ 清洗显示
+#     disp_name = _clean_display_name(review_data.get('guideline_name'))
+#     st.markdown(f"### 📋 {disp_name} - 详细审核")
+#     st.markdown(f"提取了 {review_data['extracted_count']} 条记录，请逐条确认")
+
+#     approved = len([r for r in review_data["records"] if r["status"] == "approved"])
+#     modified = len([r for r in review_data["records"] if r["status"] == "modified"])
+#     rejected = len([r for r in review_data["records"] if r["status"] == "rejected"])
+#     pending = len([r for r in review_data["records"] if r["status"] == "pending"])
+#     total = max(1, review_data["extracted_count"])
+
+#     st.progress(
+#         (approved + modified + rejected) / total,
+#         text=f"进度: ✅{approved} | ✏️{modified} | ❌{rejected} | ⏳{pending}"
+#     )
+#     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+#     for rec in review_data["records"]:
+#         status_badge = {"pending": "⏳", "approved": "✅", "modified": "✏️", "rejected": "❌"}[rec["status"]]
+
+#         with st.expander(f"{status_badge} {rec['drug_name']} - {rec['phase']}", expanded=(rec["status"] == "pending")):
+#             col_info1, col_info2 = st.columns(2)
+#             with col_info1:
+#                 st.markdown(f"**药物名称:** {rec['drug_name']}")
+#                 st.markdown(f"**治疗阶段:** {rec['phase']}")
+#                 st.markdown(f"**分类:** {rec.get('category', 'N/A')}")
+#             with col_info2:
+#                 st.markdown(f"**证据等级:** {rec['evidence_level']}")
+#                 st.markdown(f"**推荐强度:** {rec['recommendation_grade']}")
+#                 st.markdown(f"**来源:** {rec['source_table']} 第{rec['source_row']}行")
+
+#             st.markdown("---")
+
+#             col_edit1, col_edit2 = st.columns(2)
+#             with col_edit1:
+#                 new_name = st.text_input("药物名称", value=rec['drug_name'], key=f"name_{rec['id']}")
+#                 new_freq = st.text_input("给药频次", value=rec['frequency'], key=f"freq_{rec['id']}")
+#             with col_edit2:
+#                 dose_info = rec.get('dose_info', {})
+#                 new_dose_rec = st.text_input("推荐剂量", value=dose_info.get('recommended', ''), key=f"dose_rec_{rec['id']}")
+#                 new_dose_max = st.text_input("最大剂量", value=dose_info.get('max_daily', ''), key=f"dose_max_{rec['id']}")
+
+#             new_adverse = st.text_area("不良反应", value=rec.get('adverse_effects', ''), key=f"adverse_{rec['id']}")
+#             st.caption(f"原始文本片段: {rec.get('raw_text', '')[:200]}...")
+
+#             col_btn1, col_btn2, col_btn3 = st.columns(3)
+#             with col_btn1:
+#                 if st.button("✅ 批准（无修改）", key=f"approve_{rec['id']}", use_container_width=True):
+#                     editor.approve_record(review_data, rec['id'])
+#                     editor.save_reviewed_data(review_data, review_id)
+#                     st.rerun()
+#             with col_btn2:
+#                 if st.button("💾 保存修改", key=f"save_{rec['id']}", use_container_width=True):
+#                     modifications = {}
+#                     if new_name != rec['drug_name']:
+#                         modifications['drug_name'] = new_name
+
+#                     if new_phase != rec['phase']: modifications['phase'] = new_phase
+#                     if new_unit != dose_info.get('unit',''): modifications['unit'] = new_unit
+
+
+#                     if new_freq != rec['frequency']:
+#                         modifications['frequency'] = new_freq
+
+#                     if new_dose_rec or new_dose_max:
+#                         modifications['dose_info'] = {'recommended': new_dose_rec, 'max_daily': new_dose_max,
+#                                                         'unit': new_unit,}  # ← 关键：把单位也带上
+
+#                     if new_evidence != rec.get('evidence_level',''): modifications['evidence_level'] = new_evidence
+#                     if new_grade != rec.get('recommendation_grade',''): modifications['recommendation_grade'] = new_grade
+                        
+#                     if new_adverse != rec.get('adverse_effects', ''):
+#                         modifications['adverse_effects'] = new_adverse
+#                     editor.apply_modifications(review_data, rec['id'], modifications)
+#                     editor.save_reviewed_data(review_data, review_id)
+#                     st.rerun()
+#             with col_btn3:
+#                 if st.button("❌ 拒绝", key=f"reject_{rec['id']}", use_container_width=True):
+#                     editor.reject_record(review_data, rec['id'], "用户在页面直接拒绝")
+#                     # reason = st.text_input("拒绝理由", key=f"reason_{rec['id']}")
+#                     # editor.reject_record(review_data, rec['id'], reason)
+#                     editor.save_reviewed_data(review_data, review_id)
+#                     st.rerun()
+
+#     st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
 def _render_review_detail(editor, review_id: str):
     review_data = editor.load_reviewed_data(review_id)
@@ -362,9 +458,8 @@ def _render_review_detail(editor, review_id: str):
             st.rerun()
         return
 
-    # ★ 清洗显示
-    disp_name = _clean_display_name(review_data.get('guideline_name'))
-    st.markdown(f"### 📋 {disp_name} - 详细审核")
+    guideline_name = _clean_display_name(review_data.get('guideline_name'))
+    st.markdown(f"### 📋 {guideline_name} - 详细审核")
     st.markdown(f"提取了 {review_data['extracted_count']} 条记录，请逐条确认")
 
     approved = len([r for r in review_data["records"] if r["status"] == "approved"])
@@ -377,61 +472,151 @@ def _render_review_detail(editor, review_id: str):
         (approved + modified + rejected) / total,
         text=f"进度: ✅{approved} | ✏️{modified} | ❌{rejected} | ⏳{pending}"
     )
-    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    PHASE_OPTIONS = ["急性期", "预防期", "慢性偏头痛", "围经期", "间歇期", "妊娠期", "哺乳期", "未知"]
 
     for rec in review_data["records"]:
         status_badge = {"pending": "⏳", "approved": "✅", "modified": "✏️", "rejected": "❌"}[rec["status"]]
 
-        with st.expander(f"{status_badge} {rec['drug_name']} - {rec['phase']}", expanded=(rec["status"] == "pending")):
-            col_info1, col_info2 = st.columns(2)
-            with col_info1:
-                st.markdown(f"**药物名称:** {rec['drug_name']}")
-                st.markdown(f"**治疗阶段:** {rec['phase']}")
-                st.markdown(f"**分类:** {rec.get('category', 'N/A')}")
-            with col_info2:
-                st.markdown(f"**证据等级:** {rec['evidence_level']}")
-                st.markdown(f"**推荐强度:** {rec['recommendation_grade']}")
-                st.markdown(f"**来源:** {rec['source_table']} 第{rec['source_row']}行")
+        # ★ 核心修改：只有成功提取到阶段时，才拼接在标题上
+        title_phase = f" - {rec['phase']}" if rec.get('phase') else ""
+        
+        with st.expander(
+            f"{status_badge} {rec['drug_name']}{title_phase}",
+            expanded=(rec["status"] == "pending"),
+        ):
+            dose_info = rec.get('dose_info', {}) or {}
+            if not isinstance(dose_info, dict):
+                dose_info = {}
 
-            st.markdown("---")
+            # 禁忌症：兼容列表/字符串
+            contraindications = rec.get('contraindications', [])
+            if isinstance(contraindications, (list, tuple)):
+                contra_text = "、".join([str(x) for x in contraindications if x])
+            else:
+                contra_text = str(contraindications or "")
 
-            col_edit1, col_edit2 = st.columns(2)
-            with col_edit1:
+            # 指南来源：取原始文档 → 清洗
+            raw_source = (rec.get('_original_doc', {}) or {}).get('source', {}).get('guideline') or guideline_name
+            display_source = _clean_display_name(raw_source)
+
+            # ── 第1排：药物名称 / 推荐剂量 / 剂量单位 ──
+            col_row1_1, col_row1_2, col_row1_3 = st.columns(3)
+            with col_row1_1:
                 new_name = st.text_input("药物名称", value=rec['drug_name'], key=f"name_{rec['id']}")
-                new_freq = st.text_input("给药频次", value=rec['frequency'], key=f"freq_{rec['id']}")
-            with col_edit2:
-                dose_info = rec.get('dose_info', {})
+            with col_row1_2:
                 new_dose_rec = st.text_input("推荐剂量", value=dose_info.get('recommended', ''), key=f"dose_rec_{rec['id']}")
-                new_dose_max = st.text_input("最大剂量", value=dose_info.get('max_daily', ''), key=f"dose_max_{rec['id']}")
+            with col_row1_3:
+                new_unit = st.text_input("剂量单位", value=dose_info.get('unit', ''), key=f"unit_{rec['id']}")
 
-            new_adverse = st.text_area("不良反应", value=rec.get('adverse_effects', ''), key=f"adverse_{rec['id']}")
+            # 增加行间距
+            st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+
+            # ── 第2排：治疗阶段 / 最大剂量 / 证据等级 ──
+            col_row2_1, col_row2_2, col_row2_3 = st.columns(3)
+            with col_row2_1:
+                if rec.get('phase') in PHASE_OPTIONS:
+                    phase_index = PHASE_OPTIONS.index(rec['phase'])
+                else:
+                    phase_index = 0  # 默认急性期
+                new_phase = st.selectbox("治疗阶段", options=PHASE_OPTIONS, index=phase_index, key=f"phase_{rec['id']}")
+            with col_row2_2:
+                new_dose_max = st.text_input("最大剂量", value=dose_info.get('max_daily', ''), key=f"dose_max_{rec['id']}")
+            with col_row2_3:
+                new_evidence = st.text_input("证据等级", value=rec.get('evidence_level', ''), key=f"ev_{rec['id']}")
+
+            # 增加行间距
+            st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+
+            # ── 第3排：给药频次 / 推荐强度 / 指南来源 ──
+            col_row3_1, col_row3_2, col_row3_3 = st.columns(3)
+            with col_row3_1:
+                new_freq = st.text_input("给药频次", value=rec.get('frequency', ''), key=f"freq_{rec['id']}")
+            with col_row3_2:
+                new_grade = st.text_input("推荐强度", value=rec.get('recommendation_grade', ''), key=f"gr_{rec['id']}")
+            with col_row3_3:
+                # 用 text_area 来容纳长文本，设置 height=68 使其与旁边的单行输入框视觉平齐
+                new_source_guideline = st.text_area(
+                    "指南来源", 
+                    value=display_source, 
+                    key=f"src_gl_{rec['id']}", 
+                    height=68
+                )
+
+            # 增加行间距
+            st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+
+            # ── 文本域区（独占整行） ──
+            new_adverse = st.text_area("不良反应", value=rec.get('adverse_effects', ''), key=f"adverse_{rec['id']}", height=80)
+            
+            st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+            
+            new_contra = st.text_area("禁忌症", value=contra_text, key=f"contra_{rec['id']}", height=80)
+
+            st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
             st.caption(f"原始文本片段: {rec.get('raw_text', '')[:200]}...")
 
+            # ── 操作按钮 ──
             col_btn1, col_btn2, col_btn3 = st.columns(3)
+
             with col_btn1:
                 if st.button("✅ 批准（无修改）", key=f"approve_{rec['id']}", use_container_width=True):
                     editor.approve_record(review_data, rec['id'])
                     editor.save_reviewed_data(review_data, review_id)
                     st.rerun()
+
             with col_btn2:
                 if st.button("💾 保存修改", key=f"save_{rec['id']}", use_container_width=True):
                     modifications = {}
+
                     if new_name != rec['drug_name']:
                         modifications['drug_name'] = new_name
-                    if new_freq != rec['frequency']:
+                    if new_phase != rec.get('phase'):
+                        modifications['phase'] = new_phase
+                    if new_freq != rec.get('frequency'):
                         modifications['frequency'] = new_freq
-                    if new_dose_rec or new_dose_max:
-                        modifications['dose_info'] = {'recommended': new_dose_rec, 'max_daily': new_dose_max}
-                    if new_adverse != rec.get('adverse_effects', ''):
+                    if new_evidence != rec.get('evidence_level'):
+                        modifications['evidence_level'] = new_evidence
+                    if new_grade != rec.get('recommendation_grade'):
+                        modifications['recommendation_grade'] = new_grade
+                    if new_adverse != rec.get('adverse_effects'):
                         modifications['adverse_effects'] = new_adverse
-                    editor.apply_modifications(review_data, rec['id'], modifications)
-                    editor.save_reviewed_data(review_data, review_id)
-                    st.rerun()
+
+                    # 禁忌症：字符串 → 列表
+                    new_contra_list = [x.strip() for x in re.split(r'[、,，;；\n]+', new_contra) if x.strip()]
+                    old_contra_list = contraindications if isinstance(contraindications, list) else []
+                    if new_contra_list != old_contra_list:
+                        modifications['contraindications'] = new_contra_list
+
+                    # 指南来源写回
+                    if new_source_guideline != display_source:
+                        modifications['source_guideline'] = new_source_guideline
+
+                    # 剂量信息打包
+                    new_dose_pack = {
+                        'recommended': new_dose_rec,
+                        'max_daily': new_dose_max,
+                        'unit': new_unit,
+                    }
+                    old_dose_pack = {
+                        'recommended': dose_info.get('recommended', ''),
+                        'max_daily': dose_info.get('max_daily', ''),
+                        'unit': dose_info.get('unit', ''),
+                    }
+                    if new_dose_pack != old_dose_pack:
+                        modifications['dose_info'] = new_dose_pack
+
+                    if modifications:
+                        editor.apply_modifications(review_data, rec['id'], modifications)
+                        editor.save_reviewed_data(review_data, review_id)
+                        st.rerun()
+                    else:
+                        st.info("没有检测到修改内容")
+
             with col_btn3:
                 if st.button("❌ 拒绝", key=f"reject_{rec['id']}", use_container_width=True):
                     editor.reject_record(review_data, rec['id'], "用户在页面直接拒绝")
-                    # reason = st.text_input("拒绝理由", key=f"reason_{rec['id']}")
-                    # editor.reject_record(review_data, rec['id'], reason)
                     editor.save_reviewed_data(review_data, review_id)
                     st.rerun()
 

@@ -135,6 +135,10 @@ class ESReviewEditor:
                     dose_info = {
                         "recommended": rec.get("text_original", ""),
                         "max_daily": max_d.get("text_original", "") if max_d else "",
+                        "unit": rec.get("unit", ""),
+                        "min": rec.get("min"),
+                        "max": rec.get("max"),
+                        "max_unit": max_d.get("unit", "") if max_d else "",
                     }
         elif "tcm_specific" in modality:
             tcm_spec = modality["tcm_specific"] or {}
@@ -370,13 +374,52 @@ class ESReviewEditor:
             
         return es_docs
     
+    # def _apply_modifications_to_es_doc(
+    #     self,
+    #     es_doc: Dict,
+    #     modifications: Dict,
+    # ) -> Dict:
+    #     """将用户修改应用到ES文档结构"""
+    #     # 映射审核字段到ES文档路径
+    #     field_mapping = {
+    #         "drug_name": ["intervention", "name"],
+    #         "frequency": ["intervention", "frequency"],
+    #         "route": ["intervention", "route", "description"],
+    #         "evidence_level": ["evidence", "evidence_level"],
+    #         "recommendation_grade": ["evidence", "recommendation_grade"],
+    #         "adverse_effects": ["safety", "adverse_effects", "common"],
+    #     }
+        
+    #     for field, path in field_mapping.items():
+    #         if field in modifications:
+    #             # 按路径更新嵌套字典
+    #             target = es_doc
+    #             for key in path[:-1]:
+    #                 target = target.setdefault(key, {})
+    #             target[path[-1]] = modifications[field]
+        
+    #     # 特殊处理：剂量信息
+    #     if "dose_info" in modifications:
+    #         dose_info = modifications["dose_info"]
+    #         drug_spec = es_doc.setdefault("intervention", {}) \
+    #                           .setdefault("modality_specific", {}) \
+    #                           .setdefault("drug_specific", {}) \
+    #                           .setdefault("dose", {})
+            
+    #         if "recommended" in dose_info:
+    #             drug_spec.setdefault("recommended", {})["text_original"] = dose_info["recommended"]
+    #         if "max_daily" in dose_info:
+    #             drug_spec.setdefault("max_daily", {})["text_original"] = dose_info["max_daily"]
+        
+    #     return es_doc
+
     def _apply_modifications_to_es_doc(
         self,
         es_doc: Dict,
         modifications: Dict,
     ) -> Dict:
         """将用户修改应用到ES文档结构"""
-        # 映射审核字段到ES文档路径
+        # 字段路径映射
         field_mapping = {
             "drug_name": ["intervention", "name"],
             "frequency": ["intervention", "frequency"],
@@ -384,6 +427,9 @@ class ESReviewEditor:
             "evidence_level": ["evidence", "evidence_level"],
             "recommendation_grade": ["evidence", "recommendation_grade"],
             "adverse_effects": ["safety", "adverse_effects", "common"],
+            "contraindications": ["safety", "contraindications"],
+            "source_guideline": ["source", "guideline"],
+            "phase": ["phase"],  # ★ 新增：治疗阶段
         }
         
         for field, path in field_mapping.items():
@@ -394,7 +440,7 @@ class ESReviewEditor:
                     target = target.setdefault(key, {})
                 target[path[-1]] = modifications[field]
         
-        # 特殊处理：剂量信息
+        # ★ 特殊处理：剂量信息（包含单位更新）
         if "dose_info" in modifications:
             dose_info = modifications["dose_info"]
             drug_spec = es_doc.setdefault("intervention", {}) \
@@ -402,12 +448,56 @@ class ESReviewEditor:
                               .setdefault("drug_specific", {}) \
                               .setdefault("dose", {})
             
+            new_unit = dose_info.get("unit", "")
+            
             if "recommended" in dose_info:
-                drug_spec.setdefault("recommended", {})["text_original"] = dose_info["recommended"]
+                target_rec = drug_spec.setdefault("recommended", {})
+                raw_text = dose_info["recommended"]
+                target_rec["text_original"] = raw_text
+                
+                # 重新解析数字并把单位写进去
+                parsed = self._reparse_dose_text(raw_text, new_unit)
+                target_rec.update(parsed)
+                
             if "max_daily" in dose_info:
-                drug_spec.setdefault("max_daily", {})["text_original"] = dose_info["max_daily"]
+                target_max = drug_spec.setdefault("max_daily", {})
+                raw_text = dose_info["max_daily"]
+                target_max["text_original"] = raw_text
+                
+                parsed = self._reparse_dose_text(raw_text, new_unit)
+                target_max.update(parsed)
         
         return es_doc
+
+    def _reparse_dose_text(self, text: str, unit: str) -> dict:
+        """辅助函数：解析审核后的剂量文本和单位"""
+        import re
+        if not text:
+            return {}
+            
+        clean_text = str(text).replace('～', '-').replace('~', '-')
+        numeric_part = re.sub(r'[a-zA-Z%]+', '', clean_text).strip()
+        
+        res = {"unit": unit}
+        if '-' in numeric_part:
+            parts = numeric_part.split('-')
+            if len(parts) == 2:
+                try:
+                    res["min"] = float(parts[0].strip())
+                    res["max"] = float(parts[1].strip())
+                    res["type"] = "range"
+                    return res
+                except ValueError:
+                    pass
+        try:
+            res["value"] = float(numeric_part)
+            res["type"] = "single"
+            return res
+        except ValueError:
+            pass
+            
+        res["type"] = "unparsed"
+        return res
 
 
 # ── 单元测试 ──

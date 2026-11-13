@@ -55,7 +55,7 @@ def _get_reranker():
     if _reranker_model is None:
         from FlagEmbedding import FlagReranker
         print("正在加载 BGE-Reranker 模型...")
-        _reranker_model = FlagReranker('./models/bge-reranker-base', use_fp16=True)
+        _reranker_model = FlagReranker('./models/bge-reranker-v2-m3', use_fp16=True)
     return _reranker_model
 
 

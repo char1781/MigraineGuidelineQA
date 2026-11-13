@@ -1498,7 +1498,22 @@ class MedicalGuidelineExtractor:
             route = self._extract_route(combined_text)
             
         recommended_dose = self._parse_dose_to_structured(dose_text, dose_unit_from_header)
+        # 新增：如果解析出的推荐剂量没有 unit，强制把表头抓到的 unit 塞进去
+        if recommended_dose and not recommended_dose.get("unit") and dose_unit_from_header:
+            recommended_dose["unit"] = dose_unit_from_header
+            if recommended_dose.get("type") == "range":
+                recommended_dose["text_original"] = f"{recommended_dose['min']}~{recommended_dose['max']}{dose_unit_from_header}"
+            elif recommended_dose.get("type") == "single":
+                recommended_dose["text_original"] = f"{recommended_dose['value']}{dose_unit_from_header}"
+
         max_dose = self._parse_dose_to_structured(max_dose_text, max_unit_from_header) if max_dose_text else None
+        # 新增：最大剂量同理
+        if max_dose and not max_dose.get("unit") and max_unit_from_header:
+            max_dose["unit"] = max_unit_from_header
+            if max_dose.get("type") == "range":
+                max_dose["text_original"] = f"{max_dose['min']}~{max_dose['max']}{max_unit_from_header}"
+            elif max_dose.get("type") == "single":
+                max_dose["text_original"] = f"{max_dose['value']}{max_unit_from_header}"
         
         constraints = []
         combined_constraint_text = dose_text + ' ' + max_dose_text
@@ -1550,10 +1565,14 @@ class MedicalGuidelineExtractor:
         # ===== 策略1：从括号中提取（优先级最高）=====
         # 兼容半角括号() 和 全角括号（）
         # 匹配: (mg), (mg/d), (IU/日), （mg）, （mg/次）
+        # bracket_pattern = r'[（(]([a-zA-Zμ%]+(?:/[a-zA-Z日次时周月年kg体重]+)?)[)）]'
+        # bracket_match = re.search(bracket_pattern, header_text)
+        # if bracket_match:
+        #     return bracket_match.group(1)
         bracket_pattern = r'[（(]([a-zA-Zμ%]+(?:/[a-zA-Z日次时周月年kg体重]+)?)[)）]'
-        bracket_match = re.search(bracket_pattern, header_text)
-        if bracket_match:
-            return bracket_match.group(1)
+        m = re.search(bracket_pattern, header_text)
+        if m:
+            return m.group(1)
         
         # ===== 策略2：从斜杠分隔中提取 =====
         # 匹配: 推荐剂量/mg, 推荐剂量/mg/d
@@ -1561,17 +1580,17 @@ class MedicalGuidelineExtractor:
         
         # 先检查是否有复合单位的情况
         # 例如: 推荐剂量/mg/d → 应该提取 mg/d，而不是 mg
-        slash_pattern = r'/([a-zA-Zμ%]+(?:/[a-zA-Z日次时周月年kg体重]+)?)(?:\s|$)'
-        slash_match = re.search(slash_pattern, header_text)
-        if slash_match:
-            return slash_match.group(1)
+        slash_pattern = r'/([a-zA-Zμ%]+)(?![a-zA-Z])'
+        m = re.search(slash_pattern, header_text)
+        if m:
+            return m.group(1)
         
         # ===== 策略3：从空格分隔中提取 =====
         # 匹配: 推荐剂量 mg, 每日剂量 mg/d
-        space_pattern = r'\s+([a-zA-Zμ%]+(?:/[a-zA-Z日次时周月年kg体重]+)?)$'
-        space_match = re.search(space_pattern, header_text)
-        if space_match:
-            return space_match.group(1)
+        space_pattern = r'\s([a-zA-Zμ%]+)(?:\s|$)'
+        m = re.search(space_pattern, header_text)
+        if m:
+            return m.group(1)
         
         # ===== 策略4：兜底 - 检查是否包含常见单位词 =====
         # 如果表头中明确包含 "mg" 但前面的策略都没匹配到
