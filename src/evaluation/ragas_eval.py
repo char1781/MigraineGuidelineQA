@@ -19,7 +19,8 @@ import warnings
 from typing import List, Dict, Optional
 
 from dotenv import load_dotenv
-load_dotenv()
+# override=True：以 .env 为准，避免终端里残留的同名变量（如旧的 RAGAS_JUDGE_MODEL）覆盖配置
+load_dotenv(override=True)
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="ragas")
@@ -32,16 +33,50 @@ def _ollama_base() -> str:
     return base + "/v1"
 
 
+# Ollama 默认 num_ctx=4096，长 prompt 会被静默截断（实测 13463 字符的 prompt
+# 只评估了 2050 个 token），开头指令丢失后模型只会输出散文，RAGAS 解析 JSON 失败 → NaN。
+# 因此统一使用 16k 上下文的本地模型副本（Modelfile: PARAMETER num_ctx 16384）。
+DEFAULT_LOCAL_MODEL = "qwen2.5:14b-instruct-q4_K_M-ctx16k"
+
+
 def _build_local_llm():
     from langchain_openai import ChatOpenAI
+    model = os.getenv("RAGAS_LLM_MODEL") or DEFAULT_LOCAL_MODEL
+    print(f"[RAGAS] 生成模型: Ollama {model}")
     return ChatOpenAI(
-        model=os.getenv("RAGAS_LLM_MODEL", "qwen2.5:14b-instruct-q4_K_M"),
+        model=model,
         base_url=_ollama_base(),
         api_key="ollama",
         temperature=0,
         timeout=600,      # 10 分钟超时
         max_retries=3,
     )
+
+
+def _build_judge_llm():
+    """
+    判分专用 LLM：与题目要求一致，只用本地 Ollama 模型。
+
+    faithfulness 的 n_l_i_statement_prompt 和 context_recall 的
+    context_recall_classification_prompt 要求按 pydantic schema 输出 JSON。
+    之前失败的真实原因不是模型能力，而是 Ollama 默认 num_ctx=4096 把长 prompt
+    截断了，指令丢失后模型改输出散文。改用 num_ctx=16384 的模型副本即可。
+    """
+    from langchain_openai import ChatOpenAI
+    model = os.getenv("RAGAS_JUDGE_MODEL") or os.getenv("RAGAS_LLM_MODEL") or DEFAULT_LOCAL_MODEL
+    kwargs = dict(
+        model=model,
+        base_url=_ollama_base(),
+        api_key="ollama",
+        temperature=0,
+        timeout=600,
+        max_retries=3,
+        max_tokens=int(os.getenv("RAGAS_JUDGE_MAX_TOKENS", "2048")),
+    )
+    if os.getenv("RAGAS_FORCE_JSON", "0") == "1":
+        kwargs["extra_body"] = {"response_format": {"type": "json_object"}}
+    print(f"[RAGAS] 判分模型: Ollama {model}")
+    return ChatOpenAI(**kwargs)
 
 
 def _build_local_emb():
@@ -59,7 +94,7 @@ def _build_local_emb():
 # ───────────────────────────────────────────────────────────
 def _run_retrieval_and_answer(
     dataset: List[Dict],
-    top_k: int = 5, 
+    top_k: int = 8, 
 ) -> List[Dict]:
     from src.retrieval.router import detect_query_type
 
@@ -140,9 +175,11 @@ def _run_retrieval_and_answer(
                         contexts = [x.get("message", "") for x in raw_results]
                     else:  # hybrid
                         contexts = [n.get_content() for n in raw_results]
+                        
 
             # 过滤空值
             contexts = [c.strip() for c in contexts if c and len(c.strip()) > 10]
+
             item["contexts"] = contexts[:top_k]
 
             # 新的 Prompt：放宽限制，引导提取
@@ -257,7 +294,7 @@ class RAGASEvaluator:
         try:
             from ragas.llms import LangchainLLMWrapper
             from ragas.embeddings import LangchainEmbeddingsWrapper
-            _llm = LangchainLLMWrapper(_build_local_llm())
+            _llm = LangchainLLMWrapper(_build_judge_llm())
             _emb = LangchainEmbeddingsWrapper(_build_local_emb())
         except ImportError as e:
             return {"error": f"RAGAS 未安装或缺少依赖: {e}。"}
@@ -317,7 +354,7 @@ class RAGASEvaluator:
                 llm=_llm,
                 embeddings=_emb,
                 run_config=run_config,
-                raise_exceptions=False,
+                raise_exceptions=os.getenv("RAGAS_DEBUG") == "1",
                 show_progress=True,
             )
         except TypeError:
@@ -393,3 +430,33 @@ if __name__ == "__main__":
     if "error" in result:
         print(f"\n❌ 评估失败: {result['error']}")
         sys.exit(1)
+
+# if __name__ == "__main__":
+#     import shutil
+
+#     evaluator = RAGASEvaluator(eval_dataset_path="data/eval/e2e_dataset_100.json")
+#     if not evaluator.dataset:
+#         print("❌ 未找到 100 条数据集，请检查路径。")
+#         sys.exit(1)
+
+#     # 只测 hybrid 通道
+#     hybrid_dataset = [item for item in evaluator.dataset if item.get("expected_route") == "hybrid"]
+#     if not hybrid_dataset:
+#         print("❌ 数据集中没有 expected_route=hybrid 的样本。")
+#         sys.exit(1)
+#     evaluator.dataset = hybrid_dataset
+#     print(f"⚠️ 仅评测 HYBRID 样本：{len(hybrid_dataset)} 条")
+
+#     # 备份上一轮的 100 条逐条结果，避免被 40 条结果覆盖
+#     for name in ("eval_per_sample.csv", "eval_result.json"):
+#         src = Path("data/eval") / name
+#         if src.exists():
+#             dst = src.with_name(src.stem + "_100" + src.suffix)
+#             shutil.copyfile(src, dst)
+#             print(f"📦 已备份: {dst.name}")
+
+#     result = evaluator.evaluate(fill_missing=True, sample_limit=None)
+#     if "error" in result:
+#         print(f"\n❌ 评估失败: {result['error']}")
+#         sys.exit(1)
+
