@@ -123,6 +123,7 @@ The system routes queries based on question type:
 - Ollama local models
 - Qwen 2.5 family
 - Local embeddings
+- bge-reranker-base
 - Elasticsearch
 - Chroma
 - GraphRAG
@@ -149,7 +150,7 @@ The system routes queries based on question type:
 
 - Python 3.11
 - Conda environment: `graphrag_env`
-- GraphRAG Repository：`Medical_migraine_graphrag`
+- GraphRAG Repository：<a href="https://github.com/charchar111720/Medical_migraine_graphrag" target="_blank">Medical_migraine_graphrag</a>
 - GraphRAG root: `${GRAPH_RAG_ROOT}`
 - Local models used through Ollama:
   - `qwen2.5:7b`
@@ -178,14 +179,22 @@ ollama pull bge-m3
 
 Make sure Elasticsearch is running locally at `http://localhost:9200`.
 
-### 4. Start the app
+
+### 4. Start GraphRAG
+
+Ensure GraphRAG indexing works properly.
+```bash
+graphrag index --root ./
+```
+
+### 5. Start the app
 
 ```bash
 cd ${PROJECT_ROOT}
 streamlit run app.py
 ```
 
-### 5. Upload PDFs
+### 6. Upload PDFs
 
 The workflow will automatically:
 

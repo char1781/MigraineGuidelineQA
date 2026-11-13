@@ -13,7 +13,7 @@
 - 使用自定义 chunking strategy 适配医疗指南文本
 - 支持多篇文档的增量图谱更新，而不是简单覆盖历史图谱
 
-本项目有意拆分为两个环境：
+本项目拆分为两个环境：
 - 主应用：`${PROJECT_ROOT}`
 - GraphRAG 运行环境：`${GRAPH_RAG_ROOT}`
 
@@ -126,6 +126,7 @@ Query routing:
 - Ollama 本地模型
 - Qwen 2.5 系列模型
 - 本地 embeddings
+- bge-reranker-base
 - Elasticsearch 精确/结构化检索
 - Chroma 向量数据库
 - GraphRAG 图谱推理
@@ -155,7 +156,7 @@ Query routing:
 - Python 3.11
 - Conda 环境: `graphrag_env`
 - GraphRAG 根目录：${GRAPH_RAG_ROOT}
-GraphRAG 代码仓库：Medical_migraine_graphrag
+GraphRAG 代码仓库：<a href="https://github.com/charchar111720/Medical_migraine_graphrag" target="_blank">Medical_migraine_graphrag</a>
 - 通过 Ollama 使用的本地模型：
   - qwen2.5:7b 或 qwen2.5:14b-instruct-q4_K_M
   - Embedding 模型：如 bge-m3
@@ -181,14 +182,21 @@ ollama pull bge-m3
 
 确保 Elasticsearch 在 ${ES_HOST} 本地运行。
 
-### 4. 启动应用
+### 4. 启动 GraphRAG
+
+确保 GraphRAG 能正常索引。
+```bash
+graphrag index --root ./
+```
+
+### 5. 启动应用
 
 ```bash
 cd ${PROJECT_ROOT}
 streamlit run app.py
 ```
 
-### 5. 上传 PDFs
+### 6. 上传 PDFs
 
 工作流将自动执行以下操作:
 
