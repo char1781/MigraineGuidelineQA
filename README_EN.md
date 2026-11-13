@@ -123,7 +123,7 @@ The system routes queries based on question type:
 - Ollama local models
 - Qwen 2.5 family
 - Local embeddings
-- bge-reranker-base
+- Bge-reranker-base
 - Elasticsearch
 - Chroma
 - GraphRAG
