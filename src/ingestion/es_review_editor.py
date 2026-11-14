@@ -502,29 +502,45 @@ class ESReviewEditor:
 
 # ── 单元测试 ──
 if __name__ == "__main__":
-    from src.ingestion.es_indexer import MedicalGuidelineExtractor
-    
+    """已入库数据的修正工具：改完审核文件后重新写回 ES。
+
+    用法：
+      # 仅覆盖有改动的记录（按 rule_id upsert，不会产生重复文档）
+      python -m src.ingestion.es_review_editor --review-id <review_id>
+
+      # 重新抽取过（rule_id 全变）时，先删该指南旧文档再写入
+      python -m src.ingestion.es_review_editor --review-id <review_id> \
+          --delete-guideline 中国偏头痛诊断与治疗指南
+    """
+    import argparse
+    import os
+
+    import src.config  # noqa: F401  确保 .env 已加载
+    from elasticsearch import Elasticsearch
+
+    parser = argparse.ArgumentParser(description="把审核文件重新写入 ES")
+    parser.add_argument("--review-id", required=True, help="data/review 下的 review_id（不含 .json）")
+    parser.add_argument("--delete-guideline", default="", help="写入前先删除该关键字匹配的旧文档")
+    args = parser.parse_args()
+
     editor = ESReviewEditor()
-    
-    # 测试提取
-    json_path = "data/processed/中国前庭性偏头痛诊治指南2026版.json"
-    if not Path(json_path).exists():
-        print(f"❌ 测试文件不存在: {json_path}")
-    else:
-        print("📋 开始ES提取...")
-        review_data = editor.extract_to_reviewable(json_path, MedicalGuidelineExtractor)
-        
-        print(f"✅ 提取完成，共 {review_data['extracted_count']} 条记录")
-        print(f"指南名称: {review_data['guideline_name']}")
-        
-        # 保存审核数据
-        saved_path = editor.save_reviewed_data(review_data, "test_review")
-        print(f"💾 已保存到: {saved_path}")
-        
-        # 显示前3条记录
-        print("\n前3条记录预览：")
-        for rec in review_data["records"][:3]:
-            print(f"  [{rec['id']}] {rec['drug_name']} - {rec['phase']}")
-            print(f"    剂量: {rec['dose_info'].get('recommended', 'N/A')}")
-            print(f"    证据: {rec['evidence_level']} / 推荐: {rec['recommendation_grade']}")
-            print()
+    review_data = editor.load_reviewed_data(args.review_id)
+
+    es = Elasticsearch([os.getenv("ES_HOST", "http://localhost:9200")])
+    index = os.getenv("ES_INDEX", "medical_guidelines")
+
+    if args.delete_guideline:
+        res = es.delete_by_query(
+            index=index,
+            body={"query": {"wildcard": {"source.guideline.keyword": f"*{args.delete_guideline}*"}}},
+            refresh=True,
+        )
+        print(f"🗑️  删除旧文档 {res['deleted']} 条（匹配: *{args.delete_guideline}*）")
+
+    es_docs = editor.export_to_es_docs(review_data)
+    for doc in es_docs:
+        es.index(index=index, id=doc.get("rule_id"), document=doc)
+    if es_docs:
+        es.indices.refresh(index=index)
+
+    print(f"✅ 已写入 {len(es_docs)} 条文档（按 rule_id 覆盖）")

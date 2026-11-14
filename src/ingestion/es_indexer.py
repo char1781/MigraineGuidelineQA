@@ -1,6 +1,8 @@
 import json
 import uuid
 import re
+import glob
+import difflib
 from typing import List, Dict, Optional, Tuple, Set
 from bs4 import BeautifulSoup
 import os
@@ -25,6 +27,15 @@ class TreatmentPhase(Enum):
     INTERMITTENT = '间歇期'
     PREGNANCY = '妊娠期'
     LACTATION = '哺乳期'
+    # 特殊场景/共病/人群
+    MOH = 'MOH'
+    DEPRESSION_COMORBID = '抑郁共病'
+    EPILEPSY_COMORBID = '癫痫共病'
+    ANXIETY_COMORBID = '焦虑共病'
+    MENSTRUAL = '月经性偏头痛'
+    CHILDREN = '儿童'
+    NONDRUG_ACUTE = '非药物急性期'
+    NONDRUG_PREVENTION = '非药物预防期'
     UNKNOWN = '未知'
 
 
@@ -87,6 +98,7 @@ class MedicalGuidelineExtractor:
         self.text_blocks: List[Dict] = []
         self.last_title: Optional[Dict] = None
         self.processed_indices: Set[int] = set()
+        self._content_list_used = False
         
         import hashlib
         filename = os.path.basename(json_file_path)
@@ -103,8 +115,33 @@ class MedicalGuidelineExtractor:
         try:
             with open(self.json_file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            
+
+            # 若当前文件缺少表题（MinerU 的 content.json 只有 <table>），
+            # 自动切换到同目录下内容匹配的 *_content_list.json（含 table_caption）
+            raw_json_path = None
+            if not self._is_content_list(data):
+                raw_json_path = self.json_file_path
+                matched = self._find_matching_content_list()
+                if matched:
+                    with open(matched, 'r', encoding='utf-8') as f:
+                        alt_data = json.load(f)
+                    if self._is_content_list(alt_data):
+                        print(f"[ES索引] 使用含表题的 content_list: {os.path.basename(matched)}")
+                        data = alt_data
+                        self._content_list_used = True
+            else:
+                print(f"[ES索引] 输入为 content_list 格式: {os.path.basename(self.json_file_path)}")
+                self._content_list_used = True
+
+            if self._is_content_list(data):
+                data = self._adapt_content_list(data)
+
             self._traverse(data)
+
+            # content_list 可能漏掉部分表格（如纯文本排版的"神经调控"表），
+            # 从原始 content.json 中补齐未出现的表格
+            if self._content_list_used and raw_json_path:
+                self._merge_missing_tables(raw_json_path)
 
             if not self.source_guideline:
                 self.source_guideline = self._fallback_guideline_name()
@@ -129,6 +166,170 @@ class MedicalGuidelineExtractor:
             traceback.print_exc()
             return False
     
+    # ── content_list 适配（含 table_caption，可补齐治疗阶段）─────────────
+    @staticmethod
+    def _is_content_list(data) -> bool:
+        """判断是否为 MinerU 的 *_content_list.json（扁平条目列表）"""
+        if not isinstance(data, list) or not data:
+            return False
+        first = data[0]
+        if not isinstance(first, dict):
+            return False
+        return first.get('type') in {'text', 'table', 'equation', 'image'} and 'page_idx' in first
+
+    @staticmethod
+    def _norm_title(text: str) -> str:
+        """标题归一化，便于文件名与文档标题比对"""
+        text = (text or '').lower()
+        return re.sub(r'[\s\u3000（）()《》【】\[\]\-—_.,，。:：""\'\'"、·]', '', text)
+
+    @staticmethod
+    def _read_content_list_title(path: str) -> str:
+        """读取 content_list 的一级标题"""
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                items = json.load(f)
+            for it in items:
+                if isinstance(it, dict) and it.get('type') == 'text' and it.get('text_level'):
+                    return (it.get('text') or '').strip()
+        except Exception:
+            return ''
+        return ''
+
+    def _find_matching_content_list(self) -> Optional[str]:
+        """在同目录中寻找与当前指南名匹配的 content_list 文件"""
+        base_dir = os.path.dirname(os.path.abspath(self.json_file_path))
+        base_name = os.path.basename(self.json_file_path).split('_', 1)[-1].rsplit('.', 1)[0]
+        year = re.search(r'(19|20)\d{2}', base_name)
+        year = year.group(0) if year else ''
+        # 去掉年份、"版"和标点，只保留中英文标题主体
+        name_norm = re.sub(r'[\d版\s\W_]', '', base_name)
+        if not name_norm:
+            return None
+
+        best_path, best_score = None, 0.0
+        for path in sorted(glob.glob(os.path.join(base_dir, '*_content_list.json'))):
+            title = self._read_content_list_title(path)
+            title_norm = re.sub(r'[\d版\s\W_]', '', title)
+            if not title_norm:
+                continue
+            # 年份必须一致，避免 2022/2023 版互相误配
+            title_year = re.search(r'(19|20)\d{2}', title)
+            if year and title_year and title_year.group(0) != year:
+                continue
+            if name_norm == title_norm or name_norm in title_norm or title_norm in name_norm:
+                return path
+            score = difflib.SequenceMatcher(None, title_norm, name_norm).ratio()
+            if score > best_score:
+                best_path, best_score = path, score
+
+        return best_path if best_score >= 0.9 else None
+
+    @staticmethod
+    def _table_signature(table: Dict) -> str:
+        """用去掉标签后的单元格文本作为指纹，忽略 HTML 结构差异"""
+        html = table.get('html') or table.get('content') or ''
+        return re.sub(r'\s+', '', re.sub(r'<[^>]+>', '', html))
+
+    def _adapt_content_list(self, items: List[Dict]) -> Dict:
+        """content_list → 内部 pdf_info/para_blocks 结构，并保留 table_caption"""
+        pages: Dict[int, List[Dict]] = {}
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            page = it.get('page_idx', 0)
+            obj_type = it.get('type')
+
+            if obj_type == 'text':
+                text = (it.get('text') or '').strip()
+                if not text:
+                    continue
+                obj = {
+                    'type': 'title' if it.get('text_level') else 'text',
+                    'lines': [{'spans': [{'content': text}]}],
+                    'page_idx': page,
+                }
+            elif obj_type == 'table':
+                html = it.get('table_body') or ''
+                if not html:
+                    continue
+                captions = it.get('table_caption') or []
+                caption = captions[0].strip() if captions and isinstance(captions[0], str) else ''
+                obj = {
+                    'type': 'table',
+                    'html': html,
+                    'caption': caption,
+                    'footnotes': it.get('table_footnote') or [],
+                    'page_idx': page,
+                }
+            else:
+                continue
+            pages.setdefault(page, []).append(obj)
+
+        return {
+            'pdf_info': [
+                {'page_idx': p, 'para_blocks': pages[p]} for p in sorted(pages)
+            ]
+        }
+
+    @staticmethod
+    def _iter_raw_tables(obj):
+        """递归找出原始 JSON 中所有 table 对象"""
+        if isinstance(obj, dict):
+            if obj.get('type') == 'table':
+                yield obj
+            for value in obj.values():
+                yield from MedicalGuidelineExtractor._iter_raw_tables(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                yield from MedicalGuidelineExtractor._iter_raw_tables(item)
+
+    def _table_row_keys(self, table: Dict) -> Set[str]:
+        """提取表格数据行（跳过表头）的归一化文本指纹集合"""
+        grid = self._parse_html_table_with_spans(table.get('html') or table.get('content') or '')
+        keys: Set[str] = set()
+        for row in grid[1:]:
+            cells = [re.sub(r'\s+', '', c) for c in row if c and c.strip()]
+            if cells:
+                keys.add('|'.join(cells))
+        return keys
+
+    def _merge_missing_tables(self, raw_json_path: str):
+        """把原始 content.json 中 content_list 缺失的表格补进来"""
+        try:
+            with open(raw_json_path, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+        except Exception:
+            return
+
+        existing = {self._table_signature(t) for t in self.tables}
+        existing_rows: Set[str] = set()
+        for t in self.tables:
+            existing_rows |= self._table_row_keys(t)
+        added = 0
+        for obj in self._iter_raw_tables(raw):
+            try:
+                table = self._extract_table(obj)
+            except Exception:
+                continue
+            if not table:
+                continue
+            sig = self._table_signature(table)
+            if not sig or sig in existing:
+                continue
+            # content.json 中同一张表可能以「无表题的伪表」形式再出现一次，
+            # 文本指纹（HTML 结构/换行不同）无法命中，改按数据行重叠率判重
+            rows = self._table_row_keys(table)
+            if rows and len(rows & existing_rows) / len(rows) >= 0.5:
+                continue
+            existing.add(sig)
+            existing_rows |= rows
+            self.tables.append(table)
+            added += 1
+
+        if added:
+            print(f"[ES索引] 从 content.json 补齐 {added} 张 content_list 缺失的表格")
+
     @staticmethod
     def _get_table_sort_key(table_item: Dict) -> int:
         """获取表格排序键
@@ -677,7 +878,12 @@ class MedicalGuidelineExtractor:
             table['caption'] = caption
             print(f"  处理表格[{table_idx+1}/{len(self.tables)}]: {caption[:50]}...")
 
-            phase = self._extract_phase_from_caption(caption)
+            # 阶段推断：单一主题指南（共病/人群）> 表题 > 非药物细分
+            phase = (
+                self._detect_phase_from_guideline(self.source_guideline)
+                or self._extract_phase_from_caption(caption)
+                or self._detect_non_drug_phase(caption, headers, self.source_guideline, html)
+            )
             
             if len(parsed_rows) < 2:
                 print(f"    表格行数不足")
@@ -685,7 +891,10 @@ class MedicalGuidelineExtractor:
             
             headers = parsed_rows[0]
             print(f"    表头: {headers}")
-            
+            dual_cols = self._detect_dual_phase_columns(headers)
+            if dual_cols:
+                print(f"    检测到急性/预防双列，按列拆分为两类文档: {dual_cols}")
+
             doc_count = 0
             for row_idx, cells in enumerate(parsed_rows[1:], start=1):
                 # ✅ 过滤分类行
@@ -696,7 +905,29 @@ class MedicalGuidelineExtractor:
                 # ✅ 过滤空行
                 if all(not cell or cell.strip() == '' for cell in cells):
                     continue
-                
+
+                # 一行同时覆盖急性与预防两列 → 各生成一条，避免阶段信息丢失
+                if dual_cols:
+                    acute_idx, prev_idx = dual_cols
+                    for col_idx, sub_phase in (
+                        (acute_idx, TreatmentPhase.NONDRUG_ACUTE.value),
+                        (prev_idx, TreatmentPhase.NONDRUG_PREVENTION.value),
+                    ):
+                        if col_idx >= len(cells) or not (cells[col_idx] or '').strip():
+                            continue
+                        flavored = list(cells)
+                        other_idx = prev_idx if col_idx == acute_idx else acute_idx
+                        if other_idx < len(flavored):
+                            flavored[other_idx] = ''
+                        doc = self._parse_table_row_to_document(
+                            headers, flavored, caption, sub_phase,
+                            table.get('footnotes', []), pdf_id, row_idx
+                        )
+                        if doc:
+                            es_documents.append(doc)
+                            doc_count += 1
+                    continue
+
                 doc = self._parse_table_row_to_document(
                     headers, cells, caption, phase,
                     table.get('footnotes', []), pdf_id, row_idx
@@ -824,6 +1055,7 @@ class MedicalGuidelineExtractor:
                     '处方', '非处方', '镇痛', 'cgrp', '特异性', '非特异性','用法',
                     '神经调控', '豪针刺法', '针灸', '辩经取穴', '非药物', '方案', '发作期',
                     '慢性偏头痛', '预防性', '偏头痛发作','镇痛药物','处方药','重叠推荐','防治',
+                    '主穴', '配穴', '针刺', '艾灸',
                     '常用','前庭性偏头痛','禁忌症','不良反应']
         keywords_en = ['drug', 'treatment', 'dose', 'recommendation', 'prophylaxis',
                     'acute', 'prescription', 'over-the-counter', 'cgrp',
@@ -846,17 +1078,94 @@ class MedicalGuidelineExtractor:
 
         return False
     
+    # 特殊场景/共病/人群关键词（顺序即优先级，越具体越靠前）
+    SPECIAL_PHASE_KEYWORDS = [
+        ('MOH', ['药物过度使用性头痛', '药物过度使用', '过度使用性头痛', 'moh', 'medicationoveruse']),
+        ('抑郁共病', ['抑郁共病', '共病抑郁', '抑郁障碍共病', '偏头痛与抑郁', 'depressioncomorbid']),
+        ('癫痫共病', ['癫痫共患', '癫痫共病', '癫痫合并偏头痛', '偏头痛合并癫痫', 'epilepsycomorbid']),
+        ('焦虑共病', ['焦虑共病', '共病焦虑', '焦虑障碍共病', '偏头痛与焦虑', 'anxietycomorbid']),
+        ('月经性偏头痛', ['月经性偏头痛', '月经相关性偏头痛', '月经期偏头痛', 'menstrualmigraine']),
+        ('儿童', ['儿童偏头痛', '儿童', '儿科', '患儿', '青少年', 'children', 'pediatric', 'adolescent']),
+    ]
+
+    def _match_special_phase(self, text: str) -> str:
+        """从任意文本中匹配特殊阶段关键词，匹配不到返回 ''"""
+        if not text:
+            return ''
+        compact = text.lower().replace(' ', '').replace('‑', '-')
+        for phase, keywords in self.SPECIAL_PHASE_KEYWORDS:
+            if any(kw.replace(' ', '') in compact for kw in keywords):
+                return phase
+        return ''
+
+    def _detect_phase_from_guideline(self, guideline: Optional[str]) -> str:
+        """从指南名称推断单一主题指南的阶段（共病/人群类），通用指南返回 ''"""
+        if not guideline:
+            return ''
+        phase = self._match_special_phase(guideline)
+        if phase:
+            return phase
+        # 单一主题指南：急性期治疗指南
+        if '急性期治疗指南' in guideline:
+            return TreatmentPhase.ACUTE.value
+        return ''
+
+    def _detect_non_drug_phase(
+        self, caption: str, headers: List[str], guideline: Optional[str], html: str = ''
+    ) -> str:
+        """非药物类表格：按急性/预防拆分；无法判断返回 ''"""
+        # 是否为非药物场景（指南名可提供线索）
+        scope = f"{caption or ''} {' '.join(headers or [])} {guideline or ''}".lower().replace(' ', '')
+        if '非药物' not in scope:
+            return ''
+
+        # 急性/预防只看表题与表头，避免正文里的"预防"把急性表带偏
+        header_text = f"{caption or ''} {' '.join(headers or [])}".lower().replace(' ', '')
+        if any(kw in header_text for kw in ['急性', '发作', '止痛', 'acute']):
+            return TreatmentPhase.NONDRUG_ACUTE.value
+        if any(kw in header_text for kw in ['预防', '防治', 'prophyla', 'prevent']):
+            return TreatmentPhase.NONDRUG_PREVENTION.value
+        return ''
+
+    @staticmethod
+    def _detect_dual_phase_columns(headers: List[str]) -> Optional[Tuple[int, int]]:
+        """识别"一行同时含急性与预防两列"的表格（如神经调控表）
+
+        返回 (急性列下标, 预防列下标)；不满足条件返回 None。
+        这种行无法归入单一阶段，需要按列拆成两条文档。
+        """
+        acute_idx = prev_idx = None
+        for i, h in enumerate(headers or []):
+            text = (h or '').lower()
+            if acute_idx is None and any(k in text for k in ['急性', '发作期']):
+                acute_idx = i
+            elif prev_idx is None and any(k in text for k in ['预防', '防治']):
+                prev_idx = i
+        if acute_idx is None or prev_idx is None or acute_idx == prev_idx:
+            return None
+        return acute_idx, prev_idx
+
     def _extract_phase_from_caption(self, caption):
         """从表格标题提取治疗阶段
-        三个阶段及其可能的叫法：
-        1. 急性期：急性期、急性发作期、发作急性期、急性偏头痛发作
-        2. 预防期：预防性治疗、缓解期、预防治疗
-        3. 慢性偏头痛：慢性偏头痛（通常只用预防性治疗）
+        顺序：特殊场景/共病/人群 → 非药物急性/预防 → 慢性偏头痛 → 急性期 → 预防期
         """
         if not caption:
             return ''
-        
+
         caption_clean = caption.strip().lower().replace('‑', '-').replace(' ', '')
+
+        # 优先级0: 特殊场景/共病/人群（MOH、共病、月经性、儿童）
+        special = self._match_special_phase(caption)
+        if special:
+            return special
+
+        # 优先级0.5: 非药物（需按急性/预防细分，判断不出则留空）
+        if '非药物' in caption_clean:
+            if any(kw in caption_clean for kw in ['急性', '发作', '止痛']):
+                return TreatmentPhase.NONDRUG_ACUTE.value
+            if any(kw in caption_clean for kw in ['预防', '防治']):
+                return TreatmentPhase.NONDRUG_PREVENTION.value
+            return ''
 
         # 优先级1: 慢性偏头痛（最具体）
         chronic_keywords = ['慢性偏头痛', 'chronic migraine', 'chronicmigraine']
@@ -3039,6 +3348,22 @@ class MedicalGuidelineExtractor:
         """推断治疗阶段
         """
         clean_text = text.lower()
+
+        # 单一主题指南优先（共病/人群类）
+        guideline_phase = self._detect_phase_from_guideline(self.source_guideline)
+        if guideline_phase:
+            return guideline_phase
+
+        # 正文中的特殊场景/共病/人群
+        special = self._match_special_phase(text)
+        if special:
+            return special
+
+        # 非药物场景
+        if '非药物' in clean_text:
+            if any(kw in clean_text for kw in ['急性', '发作', '止痛']):
+                return TreatmentPhase.NONDRUG_ACUTE.value
+            return TreatmentPhase.NONDRUG_PREVENTION.value
         
         if '围经期' in clean_text or '月经' in clean_text and '预防' in clean_text:
             return TreatmentPhase.PERIMENSTRUAL.value

@@ -79,6 +79,16 @@ def _build_judge_llm():
     return ChatOpenAI(**kwargs)
 
 
+def _format_es_result(doc: dict, query: str = "") -> str:
+    """
+    将 ES 结构化文档拼成一段给 LLM 用的参考文本。
+    与线上客户回复界面共用同一套按意图裁剪逻辑：
+    剂量类问题必带证据等级/推荐强度/指南来源，不良反应与禁忌症问题只带对应字段 + 来源。
+    """
+    from src.retrieval.es_retriever import format_es_doc
+    return format_es_doc(doc, query)
+
+
 def _build_local_emb():
     from langchain_openai import OpenAIEmbeddings
     return OpenAIEmbeddings(
@@ -167,10 +177,17 @@ def _run_retrieval_and_answer(
                     raw_results = r.search(q, top_k=top_k)
                     
                     if retrieval_type == "es":
-                        contexts = [
-                            x["source"].get("traceability", {}).get("raw_text_segment", "")
-                            for x in raw_results
-                        ]
+                        # ★ 用结构化字段拼接 context，让 LLM 能直接消费剂量/阶段/证据等字段
+                        from src.retrieval.es_retriever import es_needs_fallback
+                        if es_needs_fallback(q, raw_results):
+                            # 与线上一致：ES 字段覆盖不足时降级到指南全文语义检索
+                            print(f"    ↪ ES 覆盖不足，降级语义检索: {q[:40]}")
+                            hybrid = get_retriever("hybrid")
+                            nodes = hybrid.search(q, top_k=top_k) if hybrid else []
+                            contexts = ["【指南全文语义检索】\n" + n.get_content() for n in nodes]
+                        else:
+                            contexts = [_format_es_result(x["source"], q) for x in raw_results]
+                        contexts = list(dict.fromkeys(contexts))  # 去掉内容完全相同的重复参考
                     elif retrieval_type == "graph":
                         contexts = [x.get("message", "") for x in raw_results]
                     else:  # hybrid
@@ -425,6 +442,18 @@ if __name__ == "__main__":
     if not evaluator.dataset:
         print("❌ 未找到 100 条数据集，请检查路径。")
         sys.exit(1)
+
+    # 通过环境变量 RAGAS_EVAL_ROUTE 控制只跑某条通道（es / hybrid / graph / web）
+    # 例如：RAGAS_EVAL_ROUTE=es python -m src.evaluation.ragas_eval
+    only_route = os.getenv("RAGAS_EVAL_ROUTE", "").strip().lower()
+    if only_route:
+        evaluator.dataset = [
+            item for item in evaluator.dataset if item.get("expected_route") == only_route
+        ]
+        if not evaluator.dataset:
+            print(f"❌ 数据集中没有 expected_route={only_route} 的样本。")
+            sys.exit(1)
+        print(f"⚠️ 仅评测 {only_route.upper()} 通道：{len(evaluator.dataset)} 条")
 
     result = evaluator.evaluate(fill_missing=True, sample_limit=None)
     if "error" in result:

@@ -22,18 +22,21 @@ DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 # ═══════════════════════════════════════════════
 # 统一的指南名/年份清洗工具
 # ═══════════════════════════════════════════════
-_UUID_PREFIX_RE = re.compile(r'^[0-9a-f]{24,40}[\s_\-]+', re.IGNORECASE)
+_UUID_PREFIX_RE = re.compile(r'^[0-9a-f][0-9a-f\-]{22,40}[\s_\-]+', re.IGNORECASE)
 _YEAR_TAIL_RE = re.compile(r'[\s]*[（(]?\s*(?:19|20)\d{2}\s*年?\s*[)）]?\s*$')
 _YEAR_IN_NAME_RE = re.compile(r'[（(]?\s*((?:19|20)\d{2})\s*年?\s*[)）]?')
 
 
-def _clean_display_name(name) -> str:
-    """显示用：去掉 uuid 前缀、尾部的 (xxxx年) 等噪声。"""
+def _clean_display_name(name, strip_year: bool = True) -> str:
+    """显示用：去掉本机路径、文件后缀、uuid 前缀、尾部的 (xxxx年) 等噪声。"""
     if not name:
         return "未知指南"
-    s = str(name).strip()
+    s = os.path.basename(str(name).strip())
+    s = re.sub(r'\.(md|json|pdf|txt)$', '', s, flags=re.IGNORECASE)
     s = _UUID_PREFIX_RE.sub('', s).strip()
-    s = _YEAR_TAIL_RE.sub('', s).strip()
+    s = re.sub(r'^CN[\s_\-]*', '', s, flags=re.IGNORECASE)
+    if strip_year:
+        s = _YEAR_TAIL_RE.sub('', s).strip()
     return s or "未知指南"
 
 
@@ -474,7 +477,11 @@ def _render_review_detail(editor, review_id: str):
     )
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    PHASE_OPTIONS = ["急性期", "预防期", "慢性偏头痛", "围经期", "间歇期", "妊娠期", "哺乳期", "未知"]
+    PHASE_OPTIONS = [
+        "急性期", "预防期", "慢性偏头痛", "围经期", "间歇期", "妊娠期", "哺乳期",
+        "MOH", "抑郁共病", "癫痫共病", "焦虑共病", "月经性偏头痛", "儿童",
+        "非药物急性期", "非药物预防期", "未知",
+    ]
 
     for rec in review_data["records"]:
         status_badge = {"pending": "⏳", "approved": "✅", "modified": "✏️", "rejected": "❌"}[rec["status"]]
@@ -516,10 +523,15 @@ def _render_review_detail(editor, review_id: str):
             # ── 第2排：治疗阶段 / 最大剂量 / 证据等级 ──
             col_row2_1, col_row2_2, col_row2_3 = st.columns(3)
             with col_row2_1:
-                if rec.get('phase') in PHASE_OPTIONS:
-                    phase_index = PHASE_OPTIONS.index(rec['phase'])
+                phase_val = rec.get('phase') or ''
+                if phase_val in PHASE_OPTIONS:
+                    phase_index = PHASE_OPTIONS.index(phase_val)
                 else:
-                    phase_index = 0  # 默认急性期
+                    # 兼容"妊娠期预防""围经期预防"等派生的阶段值
+                    phase_index = next(
+                        (i for i, opt in enumerate(PHASE_OPTIONS) if opt != '未知' and opt in phase_val),
+                        0,  # 都没有则按默认显示
+                    )
                 new_phase = st.selectbox("治疗阶段", options=PHASE_OPTIONS, index=phase_index, key=f"phase_{rec['id']}")
             with col_row2_2:
                 new_dose_max = st.text_input("最大剂量", value=dose_info.get('max_daily', ''), key=f"dose_max_{rec['id']}")
@@ -757,10 +769,24 @@ def _real_answer(query: str) -> dict:
     # === 抽离 LLM，统一用于所有分支的总结 ===
     llm = ChatOpenAI(model="qwen2.5:14b-instruct-q4_K_M", base_url="http://localhost:11434/v1", api_key="ollama", temperature=0)
     
-    def _summarize(context: str) -> str:
+    def _summarize(context: str, require_evidence: bool = False) -> str:
         if not context or not context.strip():
             return "根据当前资料无法确定。"
-        prompt = f"根据以下资料回答问题：\n{context}\n\n问题：{query}\n回答："
+        rules = [
+            "1. 只依据资料作答，资料中没有的信息不要编造。",
+            "2. 回答简洁，直接给出结论和关键数据。",
+        ]
+        if require_evidence:
+            rules.append(
+                "3. 这是剂量类问题：必须在剂量之后给出资料中的“证据等级”和“推荐强度”，"
+                "资料缺失时写“暂无”。"
+            )
+            rules.append("4. 最后单独一行给出“指南来源：”。")
+        prompt = (
+            f"根据以下资料回答问题：\n{context}\n\n"
+            f"问题：{query}\n"
+            "要求：\n" + "\n".join(rules) + "\n回答："
+        )
         return llm.invoke(prompt).content
 
     # --- 按照 mode 走不同的检索 ---
@@ -782,10 +808,32 @@ def _real_answer(query: str) -> dict:
     #         return {"tool": "error", "answer": f"⚠️ 语义检索服务暂时不可用，请稍后重试。", "sources": []}
 
     if mode == "es":
-        from src.retrieval.es_retriever import ESRetriever
+        from src.retrieval.es_retriever import ESRetriever, detect_es_intents, es_needs_fallback
         retriever = ESRetriever()
         results = retriever.search(query, top_k=3)
-        context = retriever.format_context(results)
+
+        # ES 只覆盖治疗表格；阶段/禁忌/特殊人群等信息不足时降级到语义检索
+        if es_needs_fallback(query, results):
+            from src.retrieval.vector_retriever import VectorRetriever
+            print(f"[ES] 结构化字段不足，降级语义检索: {query}")
+            try:
+                vec = VectorRetriever()
+                nodes = vec.search(query, top_k=3)
+                context = vec.format_context(nodes)
+                sources = []
+                for n in nodes:
+                    file_name = n.metadata.get("file_name", "")
+                    if file_name:
+                        clean_name = _clean_display_name(file_name, strip_year=False)
+                        if clean_name not in sources:
+                            sources.append(clean_name)
+                note = "ℹ️ 结构化知识库未覆盖该问题，已自动切换为指南全文语义检索。\n\n"
+                return {"tool": "hybrid", "answer": note + _summarize(context), "sources": sources or ["hybrid检索"]}
+            except Exception as e:
+                print(f"[ES→Hybrid] 降级失败: {e}")
+
+        context = retriever.format_context(results, query=query)
+        require_evidence = "dose" in detect_es_intents(query)
         
         # ★ 提取真实的指南来源
         sources = []
@@ -803,7 +851,7 @@ def _real_answer(query: str) -> dict:
             if source_text not in sources:
                 sources.append(source_text)
                 
-        return {"tool": "es", "answer": _summarize(context), "sources": sources or ["ES结构化检索"]}
+        return {"tool": "es", "answer": _summarize(context, require_evidence=require_evidence), "sources": sources or ["ES结构化检索"]}
 
     if mode == "hybrid":
         from src.retrieval.vector_retriever import VectorRetriever
@@ -818,7 +866,8 @@ def _real_answer(query: str) -> dict:
                 # LlamaIndex 读取 MD 时，默认会把文件名存在 metadata["file_name"]
                 file_name = n.metadata.get("file_name", "")
                 if file_name:
-                    clean_name = _clean_display_name(file_name)
+                    # 语义检索的来源没有单独的年份字段，保留文件名里的年份
+                    clean_name = _clean_display_name(file_name, strip_year=False)
                     if clean_name not in sources:
                         sources.append(clean_name)
                         

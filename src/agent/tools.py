@@ -77,63 +77,43 @@ def query_knowledge_base(query: str) -> str:
         
         if query_type == "es":
             # ES精确检索
+            from src.retrieval.es_retriever import format_es_doc, clean_guideline_name, es_needs_fallback
             retriever = ESRetriever()
             results = retriever.search(query, top_k=3)
             if not results:
                 return "⚠️ 知识库中未找到相关信息，建议使用网络搜索工具。"
-            
-            # 格式化ES结果
+
+            # ES 只覆盖治疗表格；阶段/禁忌/特殊人群等信息不足时降级到语义检索
+            if es_needs_fallback(query, results):
+                try:
+                    from src.retrieval.vector_retriever import VectorRetriever
+                    vec = VectorRetriever()
+                    context = vec.format_context(vec.search(query, top_k=3))
+                    return "ℹ️ 结构化知识库未覆盖该问题，已切换为指南全文语义检索：\n\n" + context
+                except Exception as e:
+                    print(f"[ES→Hybrid] 降级失败: {e}")
+
+            # 按提问意图裁剪字段（剂量类必带证据等级/推荐强度/指南来源）
             docs_content = []
+            seen = set()
             sources = []
-            for i, result in enumerate(results, 1):
+            for result in results:
                 doc = result['source']
-                content = f"【参考{i}】\n"
-                content += f"药物: {doc.get('intervention', {}).get('name', 'N/A')}\n"
-                content += f"疾病: {doc.get('disease', 'N/A')}\n"
-                
-                # 提取剂量信息
-                drug_spec = doc.get('intervention', {}).get('modality_specific', {}).get('drug_specific', {})
-                dose = drug_spec.get('dose', {})
-                recommended = dose.get('recommended', {})
-                if recommended:
-                    dose_text = recommended.get('text_original', '')
-                    dose_unit = recommended.get('unit', 'mg')
-                    if dose_text and not any(u in dose_text for u in ['mg', 'g', 'ml', 'l']):
-                        dose_text = f"{dose_text}{dose_unit}"
-                    content += f"推荐剂量: {dose_text}\n"
-                
-                max_daily = dose.get('max_daily', {})
-                if max_daily:
-                    max_text = max_daily.get('text_original', '')
-                    max_unit = max_daily.get('unit', 'mg')
-                    if max_text and not any(u in max_text for u in ['mg', 'g', 'ml', 'l']):
-                        max_text = f"{max_text}{max_unit}"
-                    content += f"最大日剂量: {max_text}\n"
-                
-                # 添加证据等级
-                evidence = doc.get('evidence', {})
-                if evidence.get('evidence_level'):
-                    content += f"证据等级: {evidence['evidence_level']}\n"
-                if evidence.get('recommendation_grade'):
-                    content += f"推荐强度: {evidence['recommendation_grade']}\n"
-                
-                # 添加原始文本
-                raw_text = doc.get('traceability', {}).get('raw_text_segment', '')
-                if raw_text:
-                    content += f"\n原文: {raw_text[:200]}...\n"
-                
-                # 收集来源信息
+                body = format_es_doc(doc, query)
+                if body in seen:  # 同药不同剂型可能召回内容相同的行，避免重复占位
+                    continue
+                seen.add(body)
+                docs_content.append(f"【参考{len(docs_content) + 1}】\n{body}")
+
                 source_info = doc.get('source', {})
-                guideline = source_info.get('guideline', '未知指南')
+                guideline = clean_guideline_name(source_info.get('guideline', '未知指南'))
                 year = source_info.get('year', '未知年份')
                 sources.append(f"{guideline} ({year}年)")
-                
-                docs_content.append(content)
-            
+
             # 去重来源
             unique_sources = list(dict.fromkeys(sources))
             sources_text = "\n".join([f"  - {s}" for s in unique_sources])
-            
+
             formatted = "\n\n".join(docs_content)
             return f"📚 知识库检索结果（来自ES数据库）：\n\n{formatted}\n\n📖 信息来源:\n{sources_text}"
         
