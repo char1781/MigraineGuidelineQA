@@ -235,7 +235,13 @@ def format_es_doc(doc: dict, query: str = "", intents: Optional[List[str]] = Non
     is_summary = not intents  # 未识别意图 → 精简摘要
 
     if want_dose or is_summary:
+        frequency = intervention.get("frequency") or ""
         rec_dose = _fmt_dose_item(dose.get("recommended"))
+        # 中药/中成药的用法写在 frequency 里（"每日3次，每次4粒，口服"），
+        # 剂量字段为空时用它兜底，避免客户界面显示"推荐剂量：暂无"
+        used_freq_as_dose = not rec_dose and bool(frequency)
+        if used_freq_as_dose:
+            rec_dose = frequency
         max_dose = _fmt_dose_item(dose.get("max_daily"))
         if rec_dose:
             lines.append(f"推荐剂量：{rec_dose}")
@@ -243,10 +249,9 @@ def format_es_doc(doc: dict, query: str = "", intents: Optional[List[str]] = Non
             lines.append("推荐剂量：暂无")
         if max_dose:
             lines.append(f"最大日剂量：{max_dose}")
-        frequency = intervention.get("frequency") or ""
         route = intervention.get("route")
         route_desc = route.get("description") if isinstance(route, dict) else (route or "")
-        if frequency:
+        if frequency and not used_freq_as_dose:
             lines.append(f"给药频次：{frequency}")
         if route_desc:
             lines.append(f"给药途径：{route_desc}")

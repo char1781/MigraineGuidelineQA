@@ -52,3 +52,5 @@ rebuild_chroma_for_eval.py
 test_e2e.py
 .msc
 .mv
+.trae-html-share-packages/
+.screenshots/

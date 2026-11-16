@@ -87,8 +87,18 @@ class ESReviewEditor:
         if not success:
             raise RuntimeError(f"ES提取失败: {json_path}")
         
-        # 解析为ES文档
+        # 解析为ES文档：表格 + 正文推荐意见
+        # 很多中药（天舒胶囊、都梁软胶囊、通窍活血汤等）只出现在正文
+        # "推荐意见 X：药名，每日 N 次，每次 M 粒。（1B）" 里，表格里没有
         es_docs = extractor.parse_tables_to_elasticsearch()
+        try:
+            text_docs = extractor.parse_text_blocks_to_elasticsearch()
+        except Exception as e:
+            print(f"[审核] 正文抽取失败，仅使用表格结果: {e}")
+            text_docs = []
+
+        if text_docs:
+            es_docs = self._merge_docs(es_docs, text_docs)
         
         # 转换为审核格式
         records = []
@@ -106,9 +116,41 @@ class ESReviewEditor:
             "review_status": "pending" if records else "empty",
             "warning": None if records else "没有从该PDF中抽取到有效的药物剂量记录，请检查MinerU JSON或表格结构。",
         }
-        
+
+        # 记录 md 路径：审核完成后写ES流程要用它，缺失会导致"写入ES"直接报错
+        md_candidate = str(Path(json_path).with_suffix(".md"))
+        if Path(md_candidate).exists():
+            review_data["md_path"] = md_candidate
+
         return review_data
     
+    @staticmethod
+    def _merge_docs(table_docs: List[Dict], text_docs: List[Dict]) -> List[Dict]:
+        """合并表格与正文结果，按 (药物名, 阶段, 剂量) 去重。
+
+        表格优先：同一味药在表格里已有记录时，正文推荐意见只保留
+        表格里没有的阶段/剂量组合，避免同一行数据重复进审核。
+        """
+        def key(doc: Dict):
+            name = (doc.get("intervention") or {}).get("name") or ""
+            dose = (((doc.get("intervention") or {}).get("modality_specific") or {})
+                    .get("drug_specific") or {}).get("dose") or {}
+            rec = (dose.get("recommended") or {}).get("text_original") or ""
+            # 归一化剂量：去掉单位/频次后缀，让 "5-10mg/日" 与 "5-10mg" 视为同一条
+            rec = re.sub(r'/(日|d|天|次)', '', rec)
+            rec = re.sub(r'(mg|g|ml|mL|μg|mcg|片|粒|剂)', '', rec)
+            rec = re.sub(r'[\s，,。；;]', '', rec)
+            return (name.strip(), (doc.get("phase") or "").strip(), rec.lower())
+
+        merged, seen = [], set()
+        for doc in list(table_docs) + list(text_docs):
+            k = key(doc)
+            if k[0] and k in seen:
+                continue
+            seen.add(k)
+            merged.append(doc)
+        return merged
+
     def _es_doc_to_review_record(self, es_doc: Dict, idx: int) -> Dict:
         """将ES文档转换为审核记录"""
         intervention = es_doc.get("intervention") or {}

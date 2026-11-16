@@ -99,6 +99,10 @@ class MedicalGuidelineExtractor:
         self.last_title: Optional[Dict] = None
         self.processed_indices: Set[int] = set()
         self._content_list_used = False
+        # 最近一级章节标题，用于给正文推荐意见推断治疗阶段
+        self._current_section = ''
+        # 章节编号 → 标题，用于拼接带层级的标题（4.1.4.1 → 4.1 预防性治疗）
+        self._section_path: Dict[str, str] = {}
         
         import hashlib
         filename = os.path.basename(json_file_path)
@@ -409,6 +413,7 @@ class MedicalGuidelineExtractor:
         if self._is_valuable_text(text_content):
             self.text_blocks.append({
                 'content': text_content,
+                'section_title': self._current_section,
                 'bbox': obj.get('bbox')
             })
     
@@ -447,6 +452,22 @@ class MedicalGuidelineExtractor:
                     'text': title_text,
                     'index': obj.get('index')
                 }
+        else:
+            # 章节标题（如"4.1.4.1 中药和中西医结合治疗"），用编号拼接父级标题，
+            # 这样"4.1.4.1"能继承"4.1 偏头痛缓解期的预防性治疗"的阶段语义
+            m = re.match(r'^(\d+(?:\.\d+)*)\s*[、.]?\s*(.+)$', title_stripped)
+            if m:
+                num = m.group(1)
+                self._section_path = {
+                    k: v for k, v in self._section_path.items()
+                    if num == k or num.startswith(k + '.')
+                }
+                self._section_path[num] = title_stripped
+                parts = num.split('.')
+                self._current_section = ' '.join(
+                    self._section_path.get('.'.join(parts[:i]), '')
+                    for i in range(1, len(parts) + 1)
+                ).strip()
             
     def _is_main_guideline_title(self, text: str) -> bool:
         """判断是否为主指南标题
@@ -2461,7 +2482,20 @@ class MedicalGuidelineExtractor:
                 print(f"[文本块 {idx}/{total_blocks}] 空内容，跳过")
                 continue
             
+            # "证据描述"段落是研究结论引用（如"显示氟桂利嗪 10mg 可减少头痛"），
+            # 不是指南推荐，容易抽出错误剂量，跳过
+            if '证据描述' in content and '推荐意见' not in content:
+                continue
+
             treatments = self._extract_treatments_from_text(content)
+
+            # 正文推荐意见本身通常不含"急性期/预防期"，
+            # 用所在章节标题补阶段（如"4.3 预防性治疗"）
+            section = text_block.get('section_title') or ''
+            if section and treatments:
+                for t in treatments:
+                    if t.get('phase') in (None, '', '未知'):
+                        t['phase'] = self._infer_phase(f"{section} {content}")
             
             if treatments:
                 # 过滤无效治疗方案
@@ -2726,6 +2760,7 @@ class MedicalGuidelineExtractor:
         cleaned_text = re.sub(r'\\mathrm\{([^}]+)\}', r'\1', text)
         cleaned_text = cleaned_text.replace('\\sim', '~')
         cleaned_text = re.sub(r'\\[a-zA-Z]+\{[^}]*\}', '', cleaned_text)
+        cleaned_text = self._fix_escaped_range(cleaned_text)
         cleaned_text = cleaned_text.replace('\\', '')
         
         cleaned_text = cleaned_text.replace('～', '-').replace('~', '-')
@@ -2800,7 +2835,7 @@ class MedicalGuidelineExtractor:
         
         for match in re.finditer(pattern1, cleaned_text):
             start_pos = match.start()
-            drug_name = match.group(1).strip()
+            drug_name = self._clean_drug_name(match.group(1))
             dose_num = match.group(2).strip().replace('～', '-').replace(' ', '')
             dose_unit = match.group(3).strip()
             dose_ext = match.group(4).strip() if match.group(4) else ''
@@ -2864,7 +2899,7 @@ class MedicalGuidelineExtractor:
         perimenstrual_pattern += r'(mg|g|ml|IU|μg)'  # 单位
         
         for match in re.finditer(perimenstrual_pattern, cleaned_text):
-            drug_name = match.group(1).strip()
+            drug_name = self._clean_drug_name(match.group(1))
             dose_num = match.group(2).strip()
             dose_unit = match.group(3).strip()
             
@@ -2905,6 +2940,7 @@ class MedicalGuidelineExtractor:
         cleaned_text = re.sub(r'\\mathrm\{([^}]+)\}', r'\1', text)
         cleaned_text = cleaned_text.replace('\\sim', '~')
         cleaned_text = re.sub(r'\\[a-zA-Z]+\{[^}]*\}', '', cleaned_text)
+        cleaned_text = self._fix_escaped_range(cleaned_text)
         cleaned_text = cleaned_text.replace('\\', '')
         
         # 匹配两种格式：
@@ -2936,6 +2972,7 @@ class MedicalGuidelineExtractor:
                 freq = ' '.join([p for p in freq_parts if p]).strip()
             
             # 验证是否为药物名
+            drug_name = self._clean_drug_name(drug_name)
             if not self._is_likely_drug_name(drug_name):
                 continue
             
@@ -3148,6 +3185,26 @@ class MedicalGuidelineExtractor:
         
         return unique_treatments
     
+    @staticmethod
+    def _clean_drug_name(name: str) -> str:
+        """清洗药品名：去掉叙述性前缀和连接词，如"显示氟桂利嗪"→"氟桂利嗪"""
+        name = (name or '').strip()
+        name = re.sub(r'^(?:结果显示|研究显示|研究结果|显示|发现|可见|联合|同时|另外|并且)+', '', name)
+        name = re.sub(r'(?:与|和|及|、|联合|的)+$', '', name)
+        # 剂型不是药名（"佐米曲普坦鼻喷雾剂"被截成"鼻喷雾剂"时丢弃）
+        if name in ('鼻喷雾剂', '鼻喷剂', '喷雾剂', '注射液', '片剂', '胶囊'):
+            return ''
+        return name.strip()
+
+    @staticmethod
+    def _fix_escaped_range(text: str) -> str:
+        """还原 MinerU 输出的剂量范围：40\\160 mg → 40~160 mg
+
+        MinerU 会把范围符号（波浪号）解析成反斜杠，若直接删掉反斜杠
+        会得到 "40160mg" 这种错误剂量。
+        """
+        return re.sub(r'(?<=\d)\\(?=\d)', '~', text)
+
     def _parse_dose_from_text(self, dose_text: str) -> Dict:
         """解析剂量文本 - 支持小数和多种单位
         """
@@ -3170,6 +3227,7 @@ class MedicalGuidelineExtractor:
        # 步骤1：清理LaTeX特殊字符
         clean_text = re.sub(r'\\mathrm\{([^}]+)\}', r'\1', clean_text)
         clean_text = re.sub(r'\\[a-zA-Z]+\{[^}]*\}', '', clean_text)
+        clean_text = self._fix_escaped_range(clean_text)
         clean_text = clean_text.replace('\\', '')
         
         # 步骤2：统一波浪号为短横线（保留范围标记）
@@ -3267,6 +3325,7 @@ class MedicalGuidelineExtractor:
         """
         text = re.sub(r'\\mathrm\{([^}]+)\}', r'\1', text)
         text = re.sub(r'\\[a-zA-Z]+\{[^}]*\}', '', text)
+        text = self._fix_escaped_range(text)
         text = text.replace('\\', '')
         
         # 特殊频次（优先级高）
@@ -3442,6 +3501,7 @@ class MedicalGuidelineExtractor:
         clean_raw_text = re.sub(r'\\mathrm\{([^}]+)\}', r'\1', raw_text)  # \mathrm{mg} -> mg
         clean_raw_text = clean_raw_text.replace('\\sim', '~')  # \sim -> ~
         clean_raw_text = re.sub(r'\\[a-zA-Z]+\{[^\}~]*\}', '', clean_raw_text)  # 其他LaTeX命令，保留~
+        clean_raw_text = self._fix_escaped_range(clean_raw_text)
         clean_raw_text = clean_raw_text.replace('\\', '')  # 剩余的反斜杠
         clean_raw_text = re.sub(r'(?<=[^\d~])\s+(?=[^\d~])', ' ', clean_raw_text)  # 标准化非数字/~的空格
         clean_raw_text = re.sub(r'(?<=[\d~])\s+(?=[\d~])', '', clean_raw_text)  # 合并数字/~间的空格（5~ 10→5~10）

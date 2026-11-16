@@ -266,6 +266,13 @@ def run_pipeline_after_review(review_id: str) -> Dict:
         if saved_path and Path(saved_path).exists():
             return str(saved_path)
 
+        # 老数据兼容：用 source_file 推导同名的 md
+        src = review_data.get("source_file") or ""
+        if src:
+            cand = Path("data/processed") / f"{Path(src).stem}.md"
+            if cand.exists():
+                return str(cand)
+
         # 老数据兼容：只在当前目录确实只有一份 md 时才安全兜底
         md_files = sorted(Path("data/processed").glob("*.md"))
         if len(md_files) == 1:

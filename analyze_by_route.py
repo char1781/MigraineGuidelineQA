@@ -1,9 +1,14 @@
+import glob
+import os
 import pandas as pd
 import json
 
-# 1. 读取评测数据
-df = pd.read_csv("data/eval/eval_per_sample.csv")
-dataset = json.loads(open("data/eval/eval_dataset_100_filled_v3.json", "r", encoding="utf-8").read())
+# 1. 读取评测数据：自动取最近一次生成的逐条结果（按修改时间，不依赖文件名顺序）
+candidates = glob.glob("data/eval/eval_per_sample*.csv")
+csv_path = max(candidates, key=os.path.getmtime) if candidates else "data/eval/eval_per_sample.csv"
+print(f"读取: {csv_path}")
+df = pd.read_csv(csv_path)
+dataset = json.loads(open("data/eval/e2e_dataset_100.json", "r", encoding="utf-8").read())
 
 # 2. 把路由类型映射回 DataFrame
 # 因为原始 CSV 里可能没有路由字段，我们从 JSON 里按 user_input 匹配

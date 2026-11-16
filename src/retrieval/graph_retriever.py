@@ -36,7 +36,18 @@ from src.utils.graphrag_env import get_python, get_root, index_ready
 log = logging.getLogger(__name__)
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-_LOG_LINE = re.compile(r"^\s*(SUCCESS|INFO|WARNING|DEBUG)\b[:\s]")
+# graphrag 子进程的日志会混进 stdout，需整行过滤：
+#   13:24:36 - LiteLLM:INFO: utils.py:1899 - Wrapper: Completed Call, ...
+#   LiteLLM completion() model= qwen2.5...; provider = openai
+#   2026-11-16 13:15:46,930 - INFO - Loading Input InputFileType.text
+_LOG_LINE = re.compile(
+    r"^\s*(?:"
+    r"(?:SUCCESS|INFO|WARNING|DEBUG|ERROR|CRITICAL)\b[:\s]"
+    r"|LiteLLM\b"
+    r"|\d{2}:\d{2}:\d{2}(?:[,.]\d+)?\s*-\s*(?:LiteLLM|INFO|WARNING|DEBUG|ERROR|CRITICAL)"
+    r"|\d{4}-\d{2}-\d{2}[ T][\d:,.]+\s*-\s*(?:INFO|WARNING|DEBUG|ERROR|CRITICAL)"
+    r")"
+)
 
 
 class GraphRetriever:

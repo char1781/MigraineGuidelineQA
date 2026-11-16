@@ -348,23 +348,6 @@ class VectorRetriever:
         # self.vector_store.persist(persist_path=self.chroma_path)
         
         return index
-    
-    # def search(self, query: str, top_k: int = 4) -> List:
-    #     """
-    #     执行混合检索
-        
-    #     Args:
-    #         query: 查询文本
-    #         top_k: 返回结果数量
-        
-    #     Returns:
-    #         节点列表，每个节点有score和content
-    #     """
-    #     # 动态调整top_k
-    #     self.fusion_retriever.similarity_top_k = top_k
-        
-    #     results = self.fusion_retriever.retrieve(query)
-    #     return results
 
     def _expand_context(self, node) -> str:
         """从原文件中提取当前块前后的上下文（Parent-Child 变种）"""

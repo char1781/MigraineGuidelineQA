@@ -1,5 +1,6 @@
 import os
 import time
+import shutil
 import zipfile
 from pathlib import Path
 from typing import Dict
@@ -73,10 +74,15 @@ class MinerUClient:
         if not zip_url:
             raise RuntimeError("解析成功但未返回 zip 下载链接")
 
-        zip_path = output_dir / f"{pdf_path.stem}_mineru.zip"
+        # 每次解析都解压到独立子目录，避免与历史文档产物混在一起
+        # （曾因在共享目录里按"排序第一个"兜底，导致新文档拿到旧文档的 md/json）
+        task_dir = Path(output_dir) / "_mineru" / pdf_path.stem
+        task_dir.mkdir(parents=True, exist_ok=True)
+
+        zip_path = task_dir / f"{pdf_path.stem}_mineru.zip"
         self._download_file(zip_url, zip_path, debug=debug)
 
-        json_path, md_path = self._extract_zip(zip_path, output_dir, pdf_path.stem, debug=debug)
+        json_path, md_path = self._extract_zip(zip_path, task_dir, pdf_path.stem, debug=debug)
         zip_path.unlink()
 
         print(f"[MinerU] ✅ 解析完成")
@@ -230,45 +236,61 @@ class MinerUClient:
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(output_dir)
 
-        def _best_match(candidates, wanted: str, suffix: str):
-            preferred = []
-            for p in candidates:
-                name = p.name.lower()
-                if name.startswith(f"{wanted.lower()}.") or name.startswith(f"{wanted.lower()}_"):
-                    preferred.append(p)
-            if preferred:
-                return sorted(preferred, key=lambda p: p.name.lower())
-            return sorted(candidates, key=lambda p: p.name.lower())
+        def _pick(candidates, wanted: str, suffix: str):
+            """
+            在本次任务的独立解压目录里挑选目标文件。
 
-        json_candidates = sorted(output_dir.rglob("*_model.json"))
-        if not json_candidates:
-            json_candidates = sorted(output_dir.rglob("*.json"))
+            规则（严格，不做跨文档兜底）：
+            1. 文件名正好是 <PDF名><后缀>；
+            2. MinerU 固定输出的 full.md / full.json；
+            3. 只有一个候选，直接用；
+            4. 多个候选且无明确匹配，取体积最大的并告警——绝不按字母序取第一个，
+               否则会拿到同目录里别人的产物。
+            """
+            exact = [p for p in candidates if p.name.lower() == f"{wanted.lower()}{suffix}"]
+            if exact:
+                return exact[0]
+
+            full = [p for p in candidates if p.name.lower() == f"full{suffix}"]
+            if full:
+                return full[0]
+
+            if len(candidates) == 1:
+                return candidates[0]
+
+            print(
+                f"[MinerU] ⚠️ 有 {len(candidates)} 个 {suffix} 候选且无明确匹配，"
+                f"取体积最大的: {[p.name for p in candidates]}"
+            )
+            return max(candidates, key=lambda p: p.stat().st_size)
+
+        json_candidates = sorted(output_dir.rglob("*.json"))
         md_candidates = sorted(output_dir.rglob("*.md"))
-        if not md_candidates:
-            md_candidates = sorted(output_dir.rglob("**/*.md"))
+
+        # 优先使用 *_model.json（含 pdf_info），退化为任意 json
+        model_jsons = [p for p in json_candidates if p.name.lower().endswith("_model.json")]
+        if model_jsons:
+            json_candidates = model_jsons
 
         if not json_candidates:
             raise FileNotFoundError(f"未找到 JSON 文件，zip: {zip_path}")
         if not md_candidates:
             raise FileNotFoundError(f"未找到 MD 文件，zip: {zip_path}")
 
-        json_candidates = _best_match(json_candidates, stem, ".json")
-        md_candidates = _best_match(md_candidates, stem, ".md")
-
-        chosen_json = json_candidates[0]
-        chosen_md = md_candidates[0]
+        chosen_json = _pick(json_candidates, stem, ".json")
+        chosen_md = _pick(md_candidates, stem, ".md")
 
         final_json = output_dir / f"{stem}.json"
         final_md = output_dir / f"{stem}.md"
 
-        if chosen_json != final_json:
-            if final_json.exists():
-                final_json.unlink()
-            chosen_json.rename(final_json)
-        if chosen_md != final_md:
-            if final_md.exists():
-                final_md.unlink()
-            chosen_md.rename(final_md)
+        # 用 copy 而不是 rename：原产物保留在任务目录里，便于排查，也不会把别人的文件挪走
+        if chosen_json.resolve() != final_json.resolve():
+            shutil.copyfile(chosen_json, final_json)
+        if chosen_md.resolve() != final_md.resolve():
+            shutil.copyfile(chosen_md, final_md)
+
+        if final_md.stat().st_size < 200:
+            raise RuntimeError(f"解析出的 MD 内容异常（{final_md.stat().st_size} 字节）: {final_md}")
 
         if debug:
             print(f"[DEBUG] 找到 JSON: {[str(p) for p in json_candidates[:5]]}")

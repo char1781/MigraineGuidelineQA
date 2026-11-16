@@ -16,6 +16,7 @@ if __package__ is None or __package__ == "":
 import os
 import json
 import warnings
+from datetime import datetime
 from typing import List, Dict, Optional
 
 from dotenv import load_dotenv
@@ -24,6 +25,9 @@ load_dotenv(override=True)
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="ragas")
+
+# 每次运行统一使用一个时间戳，产物自动带日期时间，不再互相覆盖
+RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # ───────────────────────────────────────────────────────────
 # 本地模型封装（Ollama 兼容 OpenAI API）
@@ -131,7 +135,7 @@ def _run_retrieval_and_answer(
         return _retrievers[t]
 
     llm = _build_local_llm()
-    temp_save_path = Path("data/eval/eval_dataset_100_filled.json")
+    temp_save_path = Path(f"data/eval/eval_dataset_100_filled_{RUN_TS}.json")
 
     for idx, item in enumerate(dataset, 1):
         q = item.get("query") or item.get("question") or ""
@@ -289,7 +293,7 @@ class RAGASEvaluator:
         if fill_missing:
             print("\n[步骤1] 填充 contexts / answer...")
             self.dataset = _run_retrieval_and_answer(self.dataset)
-            filled_path = self.eval_dataset_path.parent / "eval_dataset_filled.json"
+            filled_path = self.eval_dataset_path.parent / f"eval_dataset_filled_{RUN_TS}.json"
             filled_path.write_text(
                 json.dumps(self.dataset, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -394,7 +398,7 @@ class RAGASEvaluator:
                     col_mean = df[name].mean()
                     scores[name] = float(col_mean) if not math.isnan(col_mean) else float('nan')
             
-            per_sample_path = self.eval_dataset_path.parent / "eval_per_sample.csv"
+            per_sample_path = self.eval_dataset_path.parent / f"eval_per_sample_{RUN_TS}.csv"
             df.to_csv(per_sample_path, index=False, encoding="utf-8")
             print(f"✅ 逐条分数已保存: {per_sample_path}")
         except Exception as e:
@@ -410,7 +414,7 @@ class RAGASEvaluator:
         scores["_ragas_version"] = ragas_version
 
         if save_result:
-            result_path = self.eval_dataset_path.parent / "eval_result.json"
+            result_path = self.eval_dataset_path.parent / f"eval_result_{RUN_TS}.json"
             clean_scores = {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in scores.items()}
             result_path.write_text(
                 json.dumps(clean_scores, ensure_ascii=False, indent=2),
@@ -459,33 +463,3 @@ if __name__ == "__main__":
     if "error" in result:
         print(f"\n❌ 评估失败: {result['error']}")
         sys.exit(1)
-
-# if __name__ == "__main__":
-#     import shutil
-
-#     evaluator = RAGASEvaluator(eval_dataset_path="data/eval/e2e_dataset_100.json")
-#     if not evaluator.dataset:
-#         print("❌ 未找到 100 条数据集，请检查路径。")
-#         sys.exit(1)
-
-#     # 只测 hybrid 通道
-#     hybrid_dataset = [item for item in evaluator.dataset if item.get("expected_route") == "hybrid"]
-#     if not hybrid_dataset:
-#         print("❌ 数据集中没有 expected_route=hybrid 的样本。")
-#         sys.exit(1)
-#     evaluator.dataset = hybrid_dataset
-#     print(f"⚠️ 仅评测 HYBRID 样本：{len(hybrid_dataset)} 条")
-
-#     # 备份上一轮的 100 条逐条结果，避免被 40 条结果覆盖
-#     for name in ("eval_per_sample.csv", "eval_result.json"):
-#         src = Path("data/eval") / name
-#         if src.exists():
-#             dst = src.with_name(src.stem + "_100" + src.suffix)
-#             shutil.copyfile(src, dst)
-#             print(f"📦 已备份: {dst.name}")
-
-#     result = evaluator.evaluate(fill_missing=True, sample_limit=None)
-#     if "error" in result:
-#         print(f"\n❌ 评估失败: {result['error']}")
-#         sys.exit(1)
-
